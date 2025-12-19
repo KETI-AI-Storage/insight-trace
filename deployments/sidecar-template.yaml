@@ -1,0 +1,200 @@
+# Insight Trace Sidecar Container Template
+# Add this container to your Pod spec to enable AI workload monitoring
+
+# Usage:
+# 1. Add `shareProcessNamespace: true` to your Pod spec
+# 2. Copy this container definition to your Pod's containers list
+# 3. Update CONTAINER_NAME env var to match your main container name
+# 4. Apply the configmap (configmap.yaml) to your namespace
+
+# Container Template:
+# - name: insight-trace
+#   image: ketidevit2/insight-trace:latest
+#   imagePullPolicy: Always
+#   ports:
+#     - containerPort: 9090
+#       name: metrics
+#   env:
+#     - name: POD_NAME
+#       valueFrom:
+#         fieldRef:
+#           fieldPath: metadata.name
+#     - name: POD_NAMESPACE
+#       valueFrom:
+#         fieldRef:
+#           fieldPath: metadata.namespace
+#     - name: NODE_NAME
+#       valueFrom:
+#         fieldRef:
+#           fieldPath: spec.nodeName
+#     - name: CONTAINER_NAME
+#       value: "YOUR_MAIN_CONTAINER_NAME"  # Change this
+#   envFrom:
+#     - configMapRef:
+#         name: insight-trace-config
+#         optional: true
+#   resources:
+#     requests:
+#       cpu: "50m"
+#       memory: "64Mi"
+#     limits:
+#       cpu: "100m"
+#       memory: "128Mi"
+#   securityContext:
+#     capabilities:
+#       add:
+#         - SYS_PTRACE
+#   readinessProbe:
+#     httpGet:
+#       path: /health
+#       port: 9090
+#     initialDelaySeconds: 5
+#     periodSeconds: 10
+#   livenessProbe:
+#     httpGet:
+#       path: /health
+#       port: 9090
+#     initialDelaySeconds: 10
+#     periodSeconds: 30
+
+---
+# Example: Kubeflow TFJob with Insight Trace
+apiVersion: kubeflow.org/v1
+kind: TFJob
+metadata:
+  name: mnist-training-with-insight
+  namespace: kubeflow
+  labels:
+    insight-trace: enabled
+spec:
+  tfReplicaSpecs:
+    Worker:
+      replicas: 1
+      template:
+        metadata:
+          labels:
+            insight-trace: enabled
+        spec:
+          shareProcessNamespace: true
+          containers:
+            # Main TensorFlow training container
+            - name: tensorflow
+              image: tensorflow/tensorflow:2.13.0-gpu
+              command: ["python", "/app/train.py"]
+              resources:
+                limits:
+                  nvidia.com/gpu: 1
+              volumeMounts:
+                - name: training-data
+                  mountPath: /data
+
+            # Insight Trace Sidecar
+            - name: insight-trace
+              image: ketidevit2/insight-trace:latest
+              ports:
+                - containerPort: 9090
+              env:
+                - name: POD_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.name
+                - name: POD_NAMESPACE
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.namespace
+                - name: NODE_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: spec.nodeName
+                - name: CONTAINER_NAME
+                  value: "tensorflow"
+              envFrom:
+                - configMapRef:
+                    name: insight-trace-config
+                    optional: true
+              resources:
+                requests:
+                  cpu: "50m"
+                  memory: "64Mi"
+                limits:
+                  cpu: "100m"
+                  memory: "128Mi"
+              securityContext:
+                capabilities:
+                  add:
+                    - SYS_PTRACE
+
+          volumes:
+            - name: training-data
+              persistentVolumeClaim:
+                claimName: training-data-pvc
+
+---
+# Example: PyTorch Distributed Training with Insight Trace
+apiVersion: kubeflow.org/v1
+kind: PyTorchJob
+metadata:
+  name: bert-training-with-insight
+  namespace: kubeflow
+  labels:
+    insight-trace: enabled
+  annotations:
+    insight.keti.re.kr/workload-type: "text"
+    insight.keti.re.kr/framework: "pytorch"
+spec:
+  pytorchReplicaSpecs:
+    Master:
+      replicas: 1
+      template:
+        spec:
+          shareProcessNamespace: true
+          containers:
+            - name: pytorch
+              image: pytorch/pytorch:2.0.1-cuda11.7-cudnn8-runtime
+              command: ["torchrun"]
+              args: ["--nproc_per_node=1", "/app/train_bert.py"]
+              resources:
+                limits:
+                  nvidia.com/gpu: 1
+              env:
+                - name: WORKLOAD_TYPE
+                  value: "text"
+                - name: FRAMEWORK
+                  value: "pytorch"
+                - name: PIPELINE_STAGE
+                  value: "training"
+
+            - name: insight-trace
+              image: ketidevit2/insight-trace:latest
+              ports:
+                - containerPort: 9090
+              env:
+                - name: POD_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.name
+                - name: POD_NAMESPACE
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.namespace
+                - name: NODE_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: spec.nodeName
+                - name: CONTAINER_NAME
+                  value: "pytorch"
+              envFrom:
+                - configMapRef:
+                    name: insight-trace-config
+                    optional: true
+              resources:
+                requests:
+                  cpu: "50m"
+                  memory: "64Mi"
+                limits:
+                  cpu: "100m"
+                  memory: "128Mi"
+              securityContext:
+                capabilities:
+                  add:
+                    - SYS_PTRACE

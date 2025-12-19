@@ -1,0 +1,230 @@
+syntax = "proto3";
+
+package insight.trace.v1;
+
+option go_package = "insight-trace/proto/tracepb";
+
+// ============================================
+// Insight Trace gRPC Service
+// Sidecar에서 제공하는 실시간 메트릭 및 워크로드 시그니처
+// ============================================
+
+service InsightTraceService {
+  // 현재 메트릭 조회
+  rpc GetCurrentMetrics(GetMetricsRequest) returns (MetricsResponse);
+
+  // 워크로드 시그니처 조회
+  rpc GetSignature(GetSignatureRequest) returns (SignatureResponse);
+
+  // 전체 트레이스 조회
+  rpc GetTrace(GetTraceRequest) returns (TraceResponse);
+
+  // 파이프라인 단계 히스토리 조회
+  rpc GetStageHistory(GetStageHistoryRequest) returns (StageHistoryResponse);
+
+  // 메트릭 스트림 (실시간 구독)
+  rpc StreamMetrics(StreamMetricsRequest) returns (stream MetricsResponse);
+
+  // 단계 전환 이벤트 스트림
+  rpc StreamStageTransitions(StreamStageRequest) returns (stream StageTransitionEvent);
+
+  // 헬스 체크
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+// ============================================
+// Request Messages
+// ============================================
+
+message GetMetricsRequest {
+  // 빈 요청 (현재 메트릭만 필요)
+}
+
+message GetSignatureRequest {
+  // 빈 요청
+}
+
+message GetTraceRequest {
+  bool include_metrics_history = 1;  // 메트릭 히스토리 포함 여부
+  int32 max_history_count = 2;       // 최대 히스토리 수
+}
+
+message GetStageHistoryRequest {
+  int32 limit = 1;  // 최대 개수
+}
+
+message StreamMetricsRequest {
+  int32 interval_seconds = 1;  // 스트리밍 간격 (기본: 5초)
+}
+
+message StreamStageRequest {
+  // 빈 요청
+}
+
+message HealthCheckRequest {
+  // 빈 요청
+}
+
+// ============================================
+// Response Messages
+// ============================================
+
+message MetricsResponse {
+  ResourceMetrics metrics = 1;
+}
+
+message SignatureResponse {
+  WorkloadSignature signature = 1;
+}
+
+message TraceResponse {
+  string trace_id = 1;
+  string pod_name = 2;
+  string pod_namespace = 3;
+  string node_name = 4;
+  bool is_active = 5;
+  WorkloadSignature current_signature = 6;
+  repeated PipelineStageMetrics stage_history = 7;
+  repeated ResourceMetrics metrics_history = 8;
+  int64 start_time_unix = 9;
+}
+
+message StageHistoryResponse {
+  PipelineStage current_stage = 1;
+  repeated PipelineStageMetrics history = 2;
+}
+
+message StageTransitionEvent {
+  string trace_id = 1;
+  string pod_name = 2;
+  string pod_namespace = 3;
+  PipelineStage from_stage = 4;
+  PipelineStage to_stage = 5;
+  int64 timestamp_unix = 6;
+  string reason = 7;
+}
+
+message HealthCheckResponse {
+  bool healthy = 1;
+  string component = 2;
+  int64 timestamp_unix = 3;
+}
+
+// ============================================
+// Data Types
+// ============================================
+
+message ResourceMetrics {
+  int64 timestamp_unix = 1;
+
+  // CPU
+  double cpu_usage_percent = 2;
+  int32 cpu_cores = 3;
+  int64 cpu_throttled_period_us = 4;
+
+  // Memory
+  int64 memory_usage_bytes = 5;
+  int64 memory_limit_bytes = 6;
+  double memory_usage_percent = 7;
+  int64 memory_rss_bytes = 8;
+
+  // GPU
+  double gpu_usage_percent = 9;
+  int64 gpu_memory_used_mb = 10;
+  int64 gpu_memory_total_mb = 11;
+  double gpu_temperature_celsius = 12;
+  double gpu_power_watts = 13;
+
+  // Disk I/O
+  int64 disk_read_bytes = 14;
+  int64 disk_write_bytes = 15;
+  int64 disk_read_ops = 16;
+  int64 disk_write_ops = 17;
+  double disk_read_bytes_per_sec = 18;
+  double disk_write_bytes_per_sec = 19;
+
+  // Network
+  int64 network_rx_bytes = 20;
+  int64 network_tx_bytes = 21;
+  double network_rx_bytes_per_sec = 22;
+  double network_tx_bytes_per_sec = 23;
+}
+
+message WorkloadSignature {
+  string pod_name = 1;
+  string pod_namespace = 2;
+  string container_name = 3;
+
+  WorkloadType workload_type = 4;
+  PipelineStage current_stage = 5;
+  IOPattern io_pattern = 6;
+  double confidence = 7;
+
+  string detected_framework = 8;
+  string detected_version = 9;
+
+  bool is_gpu_workload = 10;
+  bool is_distributed = 11;
+  int32 estimated_batch_size = 12;
+
+  // 스토리지 추천
+  string recommended_storage_class = 13;
+  string recommended_storage_size = 14;
+  int64 recommended_iops = 15;
+  int64 recommended_throughput_mbps = 16;
+
+  int64 first_seen_unix = 17;
+  int64 last_seen_unix = 18;
+  int64 updated_at_unix = 19;
+}
+
+message PipelineStageMetrics {
+  PipelineStage stage = 1;
+  int64 start_time_unix = 2;
+  int64 end_time_unix = 3;
+  double duration_seconds = 4;
+
+  double avg_cpu_usage = 5;
+  double max_cpu_usage = 6;
+  double avg_memory_usage = 7;
+  double max_memory_usage = 8;
+  double avg_gpu_usage = 9;
+  double max_gpu_usage = 10;
+
+  int64 total_read_bytes = 11;
+  int64 total_write_bytes = 12;
+  double read_write_ratio = 13;
+  IOPattern detected_io_pattern = 14;
+
+  int32 sample_count = 15;
+}
+
+// ============================================
+// Enums
+// ============================================
+
+enum WorkloadType {
+  WORKLOAD_TYPE_UNKNOWN = 0;
+  WORKLOAD_TYPE_IMAGE = 1;
+  WORKLOAD_TYPE_TEXT = 2;
+  WORKLOAD_TYPE_AUDIO = 3;
+  WORKLOAD_TYPE_MULTIMODAL = 4;
+  WORKLOAD_TYPE_TABULAR = 5;
+}
+
+enum PipelineStage {
+  PIPELINE_STAGE_UNKNOWN = 0;
+  PIPELINE_STAGE_PREPROCESSING = 1;
+  PIPELINE_STAGE_TRAINING = 2;
+  PIPELINE_STAGE_EVALUATION = 3;
+  PIPELINE_STAGE_SERVING = 4;
+}
+
+enum IOPattern {
+  IO_PATTERN_BALANCED = 0;
+  IO_PATTERN_SEQUENTIAL_READ = 1;
+  IO_PATTERN_RANDOM_READ = 2;
+  IO_PATTERN_BURST_WRITE = 3;
+  IO_PATTERN_WRITE_HEAVY = 4;
+  IO_PATTERN_DISTRIBUTED = 5;
+}

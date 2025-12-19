@@ -1,0 +1,166 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pytorch-training-with-insight
+  namespace: default
+  labels:
+    app: pytorch-training
+    insight-trace: enabled
+  annotations:
+    # Optional: Explicit hints for Insight Trace
+    insight.keti.re.kr/workload-type: "image"
+    insight.keti.re.kr/pipeline-stage: "training"
+    insight.keti.re.kr/framework: "pytorch"
+spec:
+  shareProcessNamespace: true  # Allow sidecar to see main container processes
+
+  containers:
+    # Main AI workload container
+    - name: pytorch-training
+      image: pytorch/pytorch:2.0.1-cuda11.7-cudnn8-runtime
+      command: ["python", "-c"]
+      args:
+        - |
+          import torch
+          import torch.nn as nn
+          import torch.optim as optim
+          import time
+
+          print("Starting PyTorch training simulation...")
+
+          # Simple model
+          model = nn.Sequential(
+              nn.Linear(784, 256),
+              nn.ReLU(),
+              nn.Linear(256, 10)
+          )
+
+          if torch.cuda.is_available():
+              model = model.cuda()
+              print("Using GPU")
+
+          optimizer = optim.Adam(model.parameters())
+          criterion = nn.CrossEntropyLoss()
+
+          # Training loop
+          for epoch in range(100):
+              # Simulate data loading (high I/O)
+              data = torch.randn(64, 784)
+              labels = torch.randint(0, 10, (64,))
+
+              if torch.cuda.is_available():
+                  data = data.cuda()
+                  labels = labels.cuda()
+
+              # Forward pass
+              outputs = model(data)
+              loss = criterion(outputs, labels)
+
+              # Backward pass
+              optimizer.zero_grad()
+              loss.backward()
+              optimizer.step()
+
+              if epoch % 10 == 0:
+                  print(f"Epoch {epoch}, Loss: {loss.item():.4f}")
+
+              time.sleep(1)
+
+          print("Training complete!")
+      resources:
+        requests:
+          cpu: "1000m"
+          memory: "2Gi"
+        limits:
+          cpu: "2000m"
+          memory: "4Gi"
+          # nvidia.com/gpu: "1"  # Uncomment if GPU available
+      volumeMounts:
+        - name: data-volume
+          mountPath: /data
+        - name: checkpoint-volume
+          mountPath: /checkpoints
+      env:
+        # Hints for Insight Trace (optional)
+        - name: WORKLOAD_TYPE
+          value: "image"
+        - name: FRAMEWORK
+          value: "pytorch"
+        - name: PIPELINE_STAGE
+          value: "training"
+
+    # Insight Trace Sidecar
+    - name: insight-trace
+      image: ketidevit2/insight-trace:latest
+      imagePullPolicy: Always
+      ports:
+        - containerPort: 9090
+          name: metrics
+      env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: CONTAINER_NAME
+          value: "pytorch-training"
+      envFrom:
+        - configMapRef:
+            name: insight-trace-config
+            optional: true
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "64Mi"
+        limits:
+          cpu: "100m"
+          memory: "128Mi"
+      securityContext:
+        capabilities:
+          add:
+            - SYS_PTRACE  # For process inspection
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: 9090
+        initialDelaySeconds: 5
+        periodSeconds: 10
+      livenessProbe:
+        httpGet:
+          path: /health
+          port: 9090
+        initialDelaySeconds: 10
+        periodSeconds: 30
+
+  volumes:
+    - name: data-volume
+      emptyDir: {}
+    - name: checkpoint-volume
+      emptyDir: {}
+
+  restartPolicy: Never
+---
+# Service for accessing sidecar metrics
+apiVersion: v1
+kind: Service
+metadata:
+  name: pytorch-training-insight-metrics
+  namespace: default
+  labels:
+    app: pytorch-training
+    insight-trace: enabled
+spec:
+  selector:
+    app: pytorch-training
+  ports:
+    - name: metrics
+      port: 9090
+      targetPort: 9090
+  type: ClusterIP
