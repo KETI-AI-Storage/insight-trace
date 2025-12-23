@@ -1,6 +1,14 @@
+# ============================================
 # Insight Trace Sidecar Container Template
-# Add this container to your Pod spec to enable AI workload monitoring
-
+# APOLLO Component - AI Workload Tracing
+# ============================================
+#
+# APOLLO Labels (Pod에 추가):
+#   app.kubernetes.io/name: insight-trace
+#   app.kubernetes.io/component: tracing
+#   app.kubernetes.io/part-of: apollo
+#   app.kubernetes.io/managed-by: keti
+#
 # Usage:
 # 1. Add `shareProcessNamespace: true` to your Pod spec
 # 2. Copy this container definition to your Pod's containers list

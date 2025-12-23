@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"insight-trace/pkg/argo"
 	"insight-trace/pkg/types"
 )
 
@@ -39,6 +40,12 @@ type MetricsCollector struct {
 	prevNetTx      int64
 	prevTimestamp  time.Time
 
+	// Argo Workflows integration
+	argoClient   *argo.ArgoClient
+	argoInfo     *types.ArgoWorkflowInfo
+	argoInfoMux  sync.RWMutex
+	podLabels    map[string]string
+
 	// Control
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -49,16 +56,23 @@ type MetricsCollector struct {
 func NewMetricsCollector(config *types.CollectorConfig) *MetricsCollector {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	return &MetricsCollector{
+	mc := &MetricsCollector{
 		config:         config,
 		podName:        os.Getenv("POD_NAME"),
 		podNamespace:   os.Getenv("POD_NAMESPACE"),
 		containerName:  os.Getenv("CONTAINER_NAME"),
 		nodeName:       os.Getenv("NODE_NAME"),
 		metricsHistory: make([]types.ResourceMetrics, 0, config.MaxMetricsHistory),
+		argoClient:     argo.NewArgoClient(),
+		podLabels:      make(map[string]string),
 		ctx:            ctx,
 		cancel:         cancel,
 	}
+
+	// Load pod labels from Downward API if available
+	mc.loadPodLabels()
+
+	return mc
 }
 
 // Start begins collecting metrics
@@ -496,6 +510,111 @@ func (mc *MetricsCollector) DetectProcessInfo() map[string]string {
 // GetConfig returns the collector configuration
 func (mc *MetricsCollector) GetConfig() *types.CollectorConfig {
 	return mc.config
+}
+
+// loadPodLabels loads pod labels from Kubernetes Downward API
+func (mc *MetricsCollector) loadPodLabels() {
+	// Try to read labels from Downward API file
+	labelsPath := "/etc/podinfo/labels"
+	data, err := ioutil.ReadFile(labelsPath)
+	if err != nil {
+		// Try alternative path
+		labelsPath = "/etc/kubernetes/labels"
+		data, err = ioutil.ReadFile(labelsPath)
+		if err != nil {
+			log.Printf("[Argo] Pod labels not available via Downward API")
+			return
+		}
+	}
+
+	// Parse labels (format: key="value")
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) == 2 {
+			key := strings.TrimSpace(parts[0])
+			value := strings.Trim(strings.TrimSpace(parts[1]), "\"")
+			mc.podLabels[key] = value
+		}
+	}
+
+	if len(mc.podLabels) > 0 {
+		log.Printf("[Argo] Loaded %d pod labels", len(mc.podLabels))
+	}
+}
+
+// SetPodLabels allows manually setting pod labels (useful for testing)
+func (mc *MetricsCollector) SetPodLabels(labels map[string]string) {
+	mc.podLabels = labels
+}
+
+// GetPodLabels returns the pod labels
+func (mc *MetricsCollector) GetPodLabels() map[string]string {
+	return mc.podLabels
+}
+
+// IsArgoWorkflow checks if this pod is part of an Argo Workflow
+func (mc *MetricsCollector) IsArgoWorkflow() bool {
+	if mc.argoClient == nil || !mc.argoClient.IsEnabled() {
+		return false
+	}
+	labels := mc.argoClient.DetectArgoLabels(mc.podLabels)
+	return labels != nil
+}
+
+// FetchArgoWorkflowInfo fetches Argo workflow information for this pod
+func (mc *MetricsCollector) FetchArgoWorkflowInfo() (*types.ArgoWorkflowInfo, error) {
+	if mc.argoClient == nil || !mc.argoClient.IsEnabled() {
+		return nil, fmt.Errorf("argo client not enabled")
+	}
+
+	ctx, cancel := context.WithTimeout(mc.ctx, 10*time.Second)
+	defer cancel()
+
+	info, err := mc.argoClient.GetWorkflowInfoForPod(ctx, mc.podNamespace, mc.podLabels)
+	if err != nil {
+		return nil, err
+	}
+
+	// Cache the result
+	mc.argoInfoMux.Lock()
+	mc.argoInfo = info
+	mc.argoInfoMux.Unlock()
+
+	return info, nil
+}
+
+// GetArgoWorkflowInfo returns cached Argo workflow info
+func (mc *MetricsCollector) GetArgoWorkflowInfo() *types.ArgoWorkflowInfo {
+	mc.argoInfoMux.RLock()
+	defer mc.argoInfoMux.RUnlock()
+	return mc.argoInfo
+}
+
+// RefreshArgoInfo refreshes Argo workflow information
+func (mc *MetricsCollector) RefreshArgoInfo() {
+	if !mc.IsArgoWorkflow() {
+		return
+	}
+
+	info, err := mc.FetchArgoWorkflowInfo()
+	if err != nil {
+		log.Printf("[Argo] Failed to fetch workflow info: %v", err)
+		return
+	}
+
+	if info != nil {
+		log.Printf("[Argo] Workflow info updated: %s (step: %s, phase: %s)",
+			info.WorkflowName, info.NodeName, info.Phase)
+	}
+}
+
+// GetArgoClient returns the Argo client
+func (mc *MetricsCollector) GetArgoClient() *argo.ArgoClient {
+	return mc.argoClient
 }
 
 // FormatBytes formats bytes to human readable string

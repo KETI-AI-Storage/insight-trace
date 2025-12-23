@@ -1,0 +1,192 @@
+# ============================================
+# Argo Workflow + Insight Trace 연동 테스트
+# KETI AI Storage System
+# ============================================
+# 사용법:
+#   kubectl apply -f test-argo-workflow.yaml
+#   kubectl get workflows -n default
+#   kubectl logs -f -l workflows.argoproj.io/workflow -c insight-trace
+# ============================================
+
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: ml-training-test-
+  namespace: default
+  labels:
+    component: keti-apollo
+spec:
+  entrypoint: ml-pipeline
+  serviceAccountName: default
+
+  # 볼륨 정의 (Downward API로 라벨 전달)
+  volumes:
+  - name: podinfo
+    downwardAPI:
+      items:
+      - path: "labels"
+        fieldRef:
+          fieldPath: metadata.labels
+      - path: "annotations"
+        fieldRef:
+          fieldPath: metadata.annotations
+
+  templates:
+  # 메인 DAG 파이프라인
+  - name: ml-pipeline
+    dag:
+      tasks:
+      - name: preprocess
+        template: preprocess-step
+      - name: train-image-model
+        template: train-step
+        dependencies: [preprocess]
+        arguments:
+          parameters:
+          - name: model-type
+            value: "resnet50"
+          - name: dataset
+            value: "imagenet"
+      - name: evaluate
+        template: evaluate-step
+        dependencies: [train-image-model]
+
+  # 전처리 Step
+  - name: preprocess-step
+    metadata:
+      labels:
+        pipeline-stage: preprocessing
+    container:
+      image: busybox:latest
+      command: ["/bin/sh", "-c"]
+      args:
+      - |
+        echo "Starting data preprocessing..."
+        echo "Loading raw data..."
+        sleep 10
+        echo "Preprocessing complete!"
+      volumeMounts:
+      - name: podinfo
+        mountPath: /etc/podinfo
+    sidecars:
+    - name: insight-trace
+      image: ketidevit2/insight-trace:latest
+      env:
+      - name: POD_NAME
+        valueFrom:
+          fieldRef:
+            fieldPath: metadata.name
+      - name: POD_NAMESPACE
+        valueFrom:
+          fieldRef:
+            fieldPath: metadata.namespace
+      - name: PIPELINE_STAGE
+        value: "preprocessing"
+      volumeMounts:
+      - name: podinfo
+        mountPath: /etc/podinfo
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "64Mi"
+        limits:
+          cpu: "100m"
+          memory: "128Mi"
+
+  # 학습 Step
+  - name: train-step
+    metadata:
+      labels:
+        pipeline-stage: training
+    inputs:
+      parameters:
+      - name: model-type
+      - name: dataset
+    container:
+      image: busybox:latest
+      command: ["/bin/sh", "-c"]
+      args:
+      - |
+        echo "Starting model training..."
+        echo "Model: {{inputs.parameters.model-type}}"
+        echo "Dataset: {{inputs.parameters.dataset}}"
+        echo "Simulating GPU training..."
+        # CPU 부하 시뮬레이션
+        for i in 1 2 3 4 5; do
+          echo "Epoch $i/5..."
+          dd if=/dev/zero of=/dev/null bs=1M count=50 2>/dev/null
+          sleep 5
+        done
+        echo "Training complete!"
+      volumeMounts:
+      - name: podinfo
+        mountPath: /etc/podinfo
+    sidecars:
+    - name: insight-trace
+      image: ketidevit2/insight-trace:latest
+      env:
+      - name: POD_NAME
+        valueFrom:
+          fieldRef:
+            fieldPath: metadata.name
+      - name: POD_NAMESPACE
+        valueFrom:
+          fieldRef:
+            fieldPath: metadata.namespace
+      - name: PIPELINE_STAGE
+        value: "training"
+      - name: WORKLOAD_TYPE
+        value: "image"
+      volumeMounts:
+      - name: podinfo
+        mountPath: /etc/podinfo
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "64Mi"
+        limits:
+          cpu: "100m"
+          memory: "128Mi"
+
+  # 평가 Step
+  - name: evaluate-step
+    metadata:
+      labels:
+        pipeline-stage: evaluation
+    container:
+      image: busybox:latest
+      command: ["/bin/sh", "-c"]
+      args:
+      - |
+        echo "Starting model evaluation..."
+        sleep 10
+        echo "Accuracy: 0.92"
+        echo "F1 Score: 0.89"
+        echo "Evaluation complete!"
+      volumeMounts:
+      - name: podinfo
+        mountPath: /etc/podinfo
+    sidecars:
+    - name: insight-trace
+      image: ketidevit2/insight-trace:latest
+      env:
+      - name: POD_NAME
+        valueFrom:
+          fieldRef:
+            fieldPath: metadata.name
+      - name: POD_NAMESPACE
+        valueFrom:
+          fieldRef:
+            fieldPath: metadata.namespace
+      - name: PIPELINE_STAGE
+        value: "evaluation"
+      volumeMounts:
+      - name: podinfo
+        mountPath: /etc/podinfo
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "64Mi"
+        limits:
+          cpu: "100m"
+          memory: "128Mi"

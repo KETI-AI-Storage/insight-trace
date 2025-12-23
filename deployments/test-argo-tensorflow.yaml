@@ -1,0 +1,367 @@
+# ============================================
+# TensorFlow AI Workflow + Insight Trace 테스트
+# KETI AI Storage System - 고효율 스토리지 연동
+# ============================================
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: ai-training-pipeline-
+  namespace: default
+spec:
+  entrypoint: ml-pipeline
+  serviceAccountName: default
+
+  # Artifact/Archive 설정 비활성화
+  artifactGC:
+    strategy: Never
+  archiveLogs: false
+
+  # PVC 생성 (Step 간 데이터 공유용)
+  volumeClaimTemplates:
+  - metadata:
+      name: workspace
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 2Gi
+
+  # Pod 레이블 볼륨
+  volumes:
+  - name: podinfo
+    downwardAPI:
+      items:
+      - path: "labels"
+        fieldRef:
+          fieldPath: metadata.labels
+
+  templates:
+  # ==========================================
+  # Main DAG Pipeline
+  # ==========================================
+  - name: ml-pipeline
+    dag:
+      tasks:
+      # Step 1: 데이터 전처리
+      - name: preprocess
+        template: data-preprocessing
+        arguments:
+          parameters:
+          - name: dataset-size
+            value: "1000"
+
+      # Step 2: 모델 학습
+      - name: train
+        template: model-training
+        dependencies: [preprocess]
+        arguments:
+          parameters:
+          - name: epochs
+            value: "5"
+          - name: batch-size
+            value: "32"
+
+      # Step 3: 모델 평가
+      - name: evaluate
+        template: model-evaluation
+        dependencies: [train]
+
+  # ==========================================
+  # Step 1: 데이터 전처리 Template
+  # ==========================================
+  - name: data-preprocessing
+    inputs:
+      parameters:
+      - name: dataset-size
+    container:
+      image: tensorflow/tensorflow:2.15.0
+      command: ["python", "-c"]
+      args:
+      - |
+        import tensorflow as tf
+        import numpy as np
+        import time
+        import os
+
+        print("=" * 50)
+        print("Step 1: Data Preprocessing")
+        print("=" * 50)
+
+        dataset_size = {{inputs.parameters.dataset-size}}
+        print(f"Generating synthetic dataset with {dataset_size} samples...")
+
+        # 합성 데이터셋 생성 (이미지 분류용)
+        # 실제로는 S3/MinIO에서 데이터를 로드
+        start_time = time.time()
+
+        # CIFAR-10 스타일 데이터 생성 (32x32x3 이미지)
+        X_train = np.random.rand(dataset_size, 32, 32, 3).astype(np.float32)
+        y_train = np.random.randint(0, 10, dataset_size)
+
+        # 데이터 정규화
+        X_train = X_train / 255.0
+
+        # 저장 (체크포인트)
+        os.makedirs('/workspace/data', exist_ok=True)
+        np.save('/workspace/data/X_train.npy', X_train)
+        np.save('/workspace/data/y_train.npy', y_train)
+
+        elapsed = time.time() - start_time
+        file_size = os.path.getsize('/workspace/data/X_train.npy') / (1024*1024)
+
+        print(f"Dataset shape: {X_train.shape}")
+        print(f"Labels shape: {y_train.shape}")
+        print(f"File size: {file_size:.2f} MB")
+        print(f"Preprocessing time: {elapsed:.2f}s")
+        print(f"I/O throughput: {file_size/elapsed:.2f} MB/s")
+        print("Preprocessing complete!")
+      resources:
+        requests:
+          cpu: "500m"
+          memory: "1Gi"
+        limits:
+          cpu: "1"
+          memory: "2Gi"
+      volumeMounts:
+      - name: workspace
+        mountPath: /workspace
+      - name: podinfo
+        mountPath: /etc/podinfo
+    sidecars:
+    - name: insight-trace
+      image: ketidevit2/insight-trace:latest
+      env:
+      - name: POD_NAME
+        valueFrom:
+          fieldRef:
+            fieldPath: metadata.name
+      - name: POD_NAMESPACE
+        valueFrom:
+          fieldRef:
+            fieldPath: metadata.namespace
+      volumeMounts:
+      - name: podinfo
+        mountPath: /etc/podinfo
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "64Mi"
+        limits:
+          cpu: "100m"
+          memory: "128Mi"
+
+  # ==========================================
+  # Step 2: 모델 학습 Template
+  # ==========================================
+  - name: model-training
+    inputs:
+      parameters:
+      - name: epochs
+      - name: batch-size
+    container:
+      image: tensorflow/tensorflow:2.15.0
+      command: ["python", "-c"]
+      args:
+      - |
+        import tensorflow as tf
+        import numpy as np
+        import time
+        import os
+
+        print("=" * 50)
+        print("Step 2: Model Training (CNN)")
+        print("=" * 50)
+
+        epochs = {{inputs.parameters.epochs}}
+        batch_size = {{inputs.parameters.batch-size}}
+
+        # 데이터 로드
+        print("Loading preprocessed data...")
+        start_load = time.time()
+        X_train = np.load('/workspace/data/X_train.npy')
+        y_train = np.load('/workspace/data/y_train.npy')
+        load_time = time.time() - start_load
+        print(f"Data loaded in {load_time:.2f}s")
+
+        # 간단한 CNN 모델 생성
+        print("Building CNN model...")
+        model = tf.keras.Sequential([
+            tf.keras.layers.Conv2D(32, (3, 3), activation='relu', input_shape=(32, 32, 3)),
+            tf.keras.layers.MaxPooling2D((2, 2)),
+            tf.keras.layers.Conv2D(64, (3, 3), activation='relu'),
+            tf.keras.layers.MaxPooling2D((2, 2)),
+            tf.keras.layers.Conv2D(64, (3, 3), activation='relu'),
+            tf.keras.layers.Flatten(),
+            tf.keras.layers.Dense(64, activation='relu'),
+            tf.keras.layers.Dense(10, activation='softmax')
+        ])
+
+        model.compile(
+            optimizer='adam',
+            loss='sparse_categorical_crossentropy',
+            metrics=['accuracy']
+        )
+
+        model.summary()
+
+        # 학습
+        print(f"\nTraining for {epochs} epochs with batch_size={batch_size}...")
+        start_train = time.time()
+
+        history = model.fit(
+            X_train, y_train,
+            epochs=epochs,
+            batch_size=batch_size,
+            validation_split=0.2,
+            verbose=1
+        )
+
+        train_time = time.time() - start_train
+        print(f"\nTraining completed in {train_time:.2f}s")
+
+        # 모델 저장 (체크포인트)
+        os.makedirs('/workspace/model', exist_ok=True)
+        model.save('/workspace/model/trained_model.keras')
+        model_size = os.path.getsize('/workspace/model/trained_model.keras') / (1024*1024)
+
+        print(f"Model saved: {model_size:.2f} MB")
+        print(f"Final accuracy: {history.history['accuracy'][-1]:.4f}")
+        print(f"Final val_accuracy: {history.history['val_accuracy'][-1]:.4f}")
+      resources:
+        requests:
+          cpu: "1"
+          memory: "2Gi"
+        limits:
+          cpu: "2"
+          memory: "4Gi"
+      volumeMounts:
+      - name: workspace
+        mountPath: /workspace
+      - name: podinfo
+        mountPath: /etc/podinfo
+    sidecars:
+    - name: insight-trace
+      image: ketidevit2/insight-trace:latest
+      env:
+      - name: POD_NAME
+        valueFrom:
+          fieldRef:
+            fieldPath: metadata.name
+      - name: POD_NAMESPACE
+        valueFrom:
+          fieldRef:
+            fieldPath: metadata.namespace
+      volumeMounts:
+      - name: podinfo
+        mountPath: /etc/podinfo
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "64Mi"
+        limits:
+          cpu: "100m"
+          memory: "128Mi"
+
+  # ==========================================
+  # Step 3: 모델 평가 Template
+  # ==========================================
+  - name: model-evaluation
+    container:
+      image: tensorflow/tensorflow:2.15.0
+      command: ["python", "-c"]
+      args:
+      - |
+        import tensorflow as tf
+        import numpy as np
+        import time
+        import json
+        import os
+
+        print("=" * 50)
+        print("Step 3: Model Evaluation")
+        print("=" * 50)
+
+        # 모델 로드
+        print("Loading trained model...")
+        start_load = time.time()
+        model = tf.keras.models.load_model('/workspace/model/trained_model.keras')
+        load_time = time.time() - start_load
+        print(f"Model loaded in {load_time:.2f}s")
+
+        # 테스트 데이터 생성
+        print("Generating test data...")
+        X_test = np.random.rand(200, 32, 32, 3).astype(np.float32) / 255.0
+        y_test = np.random.randint(0, 10, 200)
+
+        # 평가
+        print("Evaluating model...")
+        start_eval = time.time()
+        loss, accuracy = model.evaluate(X_test, y_test, verbose=1)
+        eval_time = time.time() - start_eval
+
+        # 추론 성능 측정
+        print("\nMeasuring inference performance...")
+        inference_times = []
+        for i in range(10):
+            start = time.time()
+            _ = model.predict(X_test[:32], verbose=0)
+            inference_times.append(time.time() - start)
+
+        avg_inference = np.mean(inference_times) * 1000  # ms
+
+        # 결과 저장
+        results = {
+            "test_loss": float(loss),
+            "test_accuracy": float(accuracy),
+            "evaluation_time_sec": eval_time,
+            "avg_inference_ms": avg_inference,
+            "model_load_time_sec": load_time
+        }
+
+        os.makedirs('/workspace/results', exist_ok=True)
+        with open('/workspace/results/evaluation.json', 'w') as f:
+            json.dump(results, f, indent=2)
+
+        print("\n" + "=" * 50)
+        print("Evaluation Results:")
+        print("=" * 50)
+        print(f"Test Loss: {loss:.4f}")
+        print(f"Test Accuracy: {accuracy:.4f}")
+        print(f"Evaluation Time: {eval_time:.2f}s")
+        print(f"Avg Inference Time: {avg_inference:.2f}ms")
+        print("=" * 50)
+        print("Pipeline completed successfully!")
+      resources:
+        requests:
+          cpu: "500m"
+          memory: "1Gi"
+        limits:
+          cpu: "1"
+          memory: "2Gi"
+      volumeMounts:
+      - name: workspace
+        mountPath: /workspace
+      - name: podinfo
+        mountPath: /etc/podinfo
+    sidecars:
+    - name: insight-trace
+      image: ketidevit2/insight-trace:latest
+      env:
+      - name: POD_NAME
+        valueFrom:
+          fieldRef:
+            fieldPath: metadata.name
+      - name: POD_NAMESPACE
+        valueFrom:
+          fieldRef:
+            fieldPath: metadata.namespace
+      volumeMounts:
+      - name: podinfo
+        mountPath: /etc/podinfo
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "64Mi"
+        limits:
+          cpu: "100m"
+          memory: "128Mi"

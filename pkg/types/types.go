@@ -127,6 +127,18 @@ type WorkloadSignature struct {
 	RecommendedIOPS         int64  `json:"recommended_iops"`
 	RecommendedThroughput   int64  `json:"recommended_throughput_mbps"`
 
+	// Argo Workflows integration
+	ArgoWorkflowName    string   `json:"argo_workflow_name,omitempty"`    // Workflow 이름
+	ArgoStepName        string   `json:"argo_step_name,omitempty"`        // 현재 Step 이름
+	ArgoDependencies    []string `json:"argo_dependencies,omitempty"`     // 이전 Step들 (의존성)
+	ArgoNextSteps       []string `json:"argo_next_steps,omitempty"`       // 다음 Step들
+	ArgoDatasetInputs   []string `json:"argo_dataset_inputs,omitempty"`   // 입력 데이터셋/아티팩트
+	ArgoDatasetOutputs  []string `json:"argo_dataset_outputs,omitempty"`  // 출력 데이터셋/아티팩트
+	ArgoExecutionCount  int      `json:"argo_execution_count,omitempty"`  // 과거 실행 횟수
+	ArgoAvgDurationSec  float64  `json:"argo_avg_duration_sec,omitempty"` // 평균 실행 시간
+	ArgoLastExitCode    int      `json:"argo_last_exit_code,omitempty"`   // 마지막 종료 코드
+	ArgoPhase           string   `json:"argo_phase,omitempty"`            // Running, Succeeded, Failed
+
 	// Timestamps
 	FirstSeen time.Time  `json:"first_seen"`
 	LastSeen  time.Time  `json:"last_seen"`
@@ -154,9 +166,61 @@ type WorkloadTrace struct {
 	KubeflowRunID    string `json:"kubeflow_run_id,omitempty"`
 	KubeflowPipeline string `json:"kubeflow_pipeline,omitempty"`
 
+	// Argo Workflows integration
+	ArgoWorkflow *ArgoWorkflowInfo `json:"argo_workflow,omitempty"`
+
 	// Timestamps
 	StartTime time.Time  `json:"start_time"`
 	EndTime   *time.Time `json:"end_time,omitempty"`
+}
+
+// ArgoWorkflowInfo represents Argo Workflow metadata
+type ArgoWorkflowInfo struct {
+	// Workflow identification
+	WorkflowName      string `json:"workflow_name"`
+	WorkflowNamespace string `json:"workflow_namespace"`
+	WorkflowUID       string `json:"workflow_uid,omitempty"`
+
+	// Current node/step info
+	NodeName    string `json:"node_name"`              // Argo 내부 노드 이름
+	NodeID      string `json:"node_id,omitempty"`
+	TemplateName string `json:"template_name,omitempty"` // 사용 중인 템플릿
+
+	// DAG structure
+	Dependencies []string `json:"dependencies,omitempty"` // 이전 Step들
+	NextSteps    []string `json:"next_steps,omitempty"`   // 다음 Step들
+	IsDAGTask    bool     `json:"is_dag_task"`            // DAG 태스크 여부
+
+	// Artifacts (Dataset info)
+	InputArtifacts  []ArgoArtifact `json:"input_artifacts,omitempty"`
+	OutputArtifacts []ArgoArtifact `json:"output_artifacts,omitempty"`
+
+	// Parameters
+	InputParameters  map[string]string `json:"input_parameters,omitempty"`
+	OutputParameters map[string]string `json:"output_parameters,omitempty"`
+
+	// Execution info
+	Phase           string     `json:"phase"`                      // Pending, Running, Succeeded, Failed
+	StartedAt       *time.Time `json:"started_at,omitempty"`
+	FinishedAt      *time.Time `json:"finished_at,omitempty"`
+	EstimatedDuration float64  `json:"estimated_duration_sec,omitempty"` // 예상 실행 시간
+
+	// History (과거 실행 기록 기반)
+	HistoricalAvgDuration float64 `json:"historical_avg_duration_sec,omitempty"`
+	HistoricalSuccessRate float64 `json:"historical_success_rate,omitempty"` // 0.0 ~ 1.0
+	ExecutionCount        int     `json:"execution_count,omitempty"`
+}
+
+// ArgoArtifact represents an Argo artifact (input/output data)
+type ArgoArtifact struct {
+	Name     string `json:"name"`
+	Path     string `json:"path,omitempty"`      // 컨테이너 내 경로
+	S3Key    string `json:"s3_key,omitempty"`    // S3 경로
+	GCSKey   string `json:"gcs_key,omitempty"`   // GCS 경로
+	HTTPUrl  string `json:"http_url,omitempty"`  // HTTP URL
+	GitRepo  string `json:"git_repo,omitempty"`  // Git 저장소
+	From     string `json:"from,omitempty"`      // 다른 Step에서 가져올 때
+	Optional bool   `json:"optional,omitempty"`
 }
 
 // StageTransition represents a pipeline stage change event

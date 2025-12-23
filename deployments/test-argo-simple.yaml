@@ -1,0 +1,101 @@
+# ============================================
+# Argo Workflow + Insight Trace 간단 테스트
+# KETI AI Storage System
+# ============================================
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: insight-trace-test-
+  namespace: default
+spec:
+  entrypoint: main
+  serviceAccountName: default
+
+  # Artifact/Archive 설정 완전 비활성화
+  artifactGC:
+    strategy: Never
+
+  # 로그 아카이브 비활성화
+  archiveLogs: false
+
+  volumes:
+  - name: podinfo
+    downwardAPI:
+      items:
+      - path: "labels"
+        fieldRef:
+          fieldPath: metadata.labels
+
+  templates:
+  - name: main
+    dag:
+      tasks:
+      - name: step1
+        template: workload-step
+        arguments:
+          parameters:
+          - name: step-name
+            value: "preprocess"
+          - name: duration
+            value: "15"
+      - name: step2
+        template: workload-step
+        dependencies: [step1]
+        arguments:
+          parameters:
+          - name: step-name
+            value: "train-resnet"
+          - name: duration
+            value: "20"
+      - name: step3
+        template: workload-step
+        dependencies: [step2]
+        arguments:
+          parameters:
+          - name: step-name
+            value: "evaluate"
+          - name: duration
+            value: "10"
+
+  - name: workload-step
+    inputs:
+      parameters:
+      - name: step-name
+      - name: duration
+    container:
+      image: busybox:latest
+      command: ["/bin/sh", "-c"]
+      args:
+      - |
+        echo "=== Step: {{inputs.parameters.step-name}} ==="
+        echo "Duration: {{inputs.parameters.duration}}s"
+        for i in $(seq 1 {{inputs.parameters.duration}}); do
+          echo "Progress: $i/{{inputs.parameters.duration}}"
+          sleep 1
+        done
+        echo "Step complete!"
+      volumeMounts:
+      - name: podinfo
+        mountPath: /etc/podinfo
+    sidecars:
+    - name: insight-trace
+      image: ketidevit2/insight-trace:latest
+      env:
+      - name: POD_NAME
+        valueFrom:
+          fieldRef:
+            fieldPath: metadata.name
+      - name: POD_NAMESPACE
+        valueFrom:
+          fieldRef:
+            fieldPath: metadata.namespace
+      volumeMounts:
+      - name: podinfo
+        mountPath: /etc/podinfo
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "64Mi"
+        limits:
+          cpu: "100m"
+          memory: "128Mi"

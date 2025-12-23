@@ -75,7 +75,7 @@ func NewWorkloadAnalyzer(coll *collector.MetricsCollector, config *types.Collect
 		StageHistory: make([]types.PipelineStageMetrics, 0),
 	}
 
-	return &WorkloadAnalyzer{
+	wa := &WorkloadAnalyzer{
 		collector:        coll,
 		config:           config,
 		currentTrace:     trace,
@@ -83,6 +83,33 @@ func NewWorkloadAnalyzer(coll *collector.MetricsCollector, config *types.Collect
 		stageMetrics:     make([]types.ResourceMetrics, 0),
 		stageTransitions: make([]types.StageTransition, 0),
 		thresholds:       getDefaultThresholds(),
+	}
+
+	// Initialize Argo workflow info if available
+	wa.initArgoWorkflowInfo()
+
+	return wa
+}
+
+// initArgoWorkflowInfo initializes Argo workflow information
+func (wa *WorkloadAnalyzer) initArgoWorkflowInfo() {
+	if !wa.collector.IsArgoWorkflow() {
+		log.Printf("[Analyzer] Pod is not part of an Argo Workflow")
+		return
+	}
+
+	log.Printf("[Analyzer] Detected Argo Workflow pod, fetching workflow info...")
+	argoInfo, err := wa.collector.FetchArgoWorkflowInfo()
+	if err != nil {
+		log.Printf("[Analyzer] Failed to fetch Argo workflow info: %v", err)
+		return
+	}
+
+	if argoInfo != nil {
+		wa.currentTrace.ArgoWorkflow = argoInfo
+		wa.updateSignatureWithArgoInfo(argoInfo)
+		log.Printf("[Analyzer] Argo workflow info loaded: %s (step: %s)",
+			argoInfo.WorkflowName, argoInfo.NodeName)
 	}
 }
 
@@ -692,6 +719,162 @@ func (wa *WorkloadAnalyzer) updateSignature(metrics []types.ResourceMetrics) {
 	if len(metrics) > 0 {
 		lastMetric := metrics[len(metrics)-1]
 		signature.IsGPUWorkload = lastMetric.GPUUsagePercent > 0 || lastMetric.GPUMemoryUsedMB > 0
+	}
+
+	// Update Argo info if available
+	if argoInfo := wa.collector.GetArgoWorkflowInfo(); argoInfo != nil {
+		wa.updateSignatureWithArgoInfo(argoInfo)
+	}
+}
+
+// updateSignatureWithArgoInfo updates signature with Argo workflow information
+func (wa *WorkloadAnalyzer) updateSignatureWithArgoInfo(argoInfo *types.ArgoWorkflowInfo) {
+	if argoInfo == nil {
+		return
+	}
+
+	signature := wa.currentTrace.CurrentSignature
+
+	// Basic workflow info
+	signature.ArgoWorkflowName = argoInfo.WorkflowName
+	signature.ArgoStepName = argoInfo.NodeName
+	signature.ArgoPhase = argoInfo.Phase
+
+	// DAG dependencies
+	signature.ArgoDependencies = argoInfo.Dependencies
+	signature.ArgoNextSteps = argoInfo.NextSteps
+
+	// Dataset info from artifacts
+	if len(argoInfo.InputArtifacts) > 0 {
+		signature.ArgoDatasetInputs = make([]string, 0, len(argoInfo.InputArtifacts))
+		for _, art := range argoInfo.InputArtifacts {
+			if art.S3Key != "" {
+				signature.ArgoDatasetInputs = append(signature.ArgoDatasetInputs, art.S3Key)
+			} else if art.Path != "" {
+				signature.ArgoDatasetInputs = append(signature.ArgoDatasetInputs, art.Path)
+			} else if art.From != "" {
+				signature.ArgoDatasetInputs = append(signature.ArgoDatasetInputs, art.From)
+			}
+		}
+	}
+
+	if len(argoInfo.OutputArtifacts) > 0 {
+		signature.ArgoDatasetOutputs = make([]string, 0, len(argoInfo.OutputArtifacts))
+		for _, art := range argoInfo.OutputArtifacts {
+			if art.S3Key != "" {
+				signature.ArgoDatasetOutputs = append(signature.ArgoDatasetOutputs, art.S3Key)
+			} else if art.Path != "" {
+				signature.ArgoDatasetOutputs = append(signature.ArgoDatasetOutputs, art.Path)
+			}
+		}
+	}
+
+	// Historical data
+	signature.ArgoExecutionCount = argoInfo.ExecutionCount
+	signature.ArgoAvgDurationSec = argoInfo.HistoricalAvgDuration
+
+	// Try to infer workload type from Argo parameters/artifacts
+	wa.inferWorkloadTypeFromArgo(argoInfo)
+}
+
+// inferWorkloadTypeFromArgo tries to infer workload type from Argo metadata
+func (wa *WorkloadAnalyzer) inferWorkloadTypeFromArgo(argoInfo *types.ArgoWorkflowInfo) {
+	signature := wa.currentTrace.CurrentSignature
+
+	// If already detected, don't override
+	if signature.DetectedWorkloadType != types.WorkloadTypeUnknown {
+		return
+	}
+
+	// Check template name for hints
+	templateLower := strings.ToLower(argoInfo.TemplateName)
+	nodeLower := strings.ToLower(argoInfo.NodeName)
+
+	// Image-related keywords
+	imageKeywords := []string{"image", "vision", "cv", "cnn", "resnet", "yolo", "detectron", "segmentation"}
+	for _, kw := range imageKeywords {
+		if strings.Contains(templateLower, kw) || strings.Contains(nodeLower, kw) {
+			signature.DetectedWorkloadType = types.WorkloadTypeImage
+			signature.Confidence = 0.7
+			log.Printf("[Analyzer] Inferred workload type from Argo: image (template/node name)")
+			return
+		}
+	}
+
+	// Text/NLP keywords
+	textKeywords := []string{"nlp", "bert", "gpt", "transformer", "text", "tokenize", "llm", "embedding"}
+	for _, kw := range textKeywords {
+		if strings.Contains(templateLower, kw) || strings.Contains(nodeLower, kw) {
+			signature.DetectedWorkloadType = types.WorkloadTypeText
+			signature.Confidence = 0.7
+			log.Printf("[Analyzer] Inferred workload type from Argo: text (template/node name)")
+			return
+		}
+	}
+
+	// Audio keywords
+	audioKeywords := []string{"audio", "speech", "whisper", "asr", "tts", "voice"}
+	for _, kw := range audioKeywords {
+		if strings.Contains(templateLower, kw) || strings.Contains(nodeLower, kw) {
+			signature.DetectedWorkloadType = types.WorkloadTypeAudio
+			signature.Confidence = 0.7
+			log.Printf("[Analyzer] Inferred workload type from Argo: audio (template/node name)")
+			return
+		}
+	}
+
+	// Check input parameters for hints
+	if argoInfo.InputParameters != nil {
+		for key, value := range argoInfo.InputParameters {
+			keyLower := strings.ToLower(key)
+			valueLower := strings.ToLower(value)
+
+			if strings.Contains(keyLower, "model") || strings.Contains(keyLower, "dataset") {
+				// Check value for type hints
+				combined := keyLower + " " + valueLower
+				for _, kw := range imageKeywords {
+					if strings.Contains(combined, kw) {
+						signature.DetectedWorkloadType = types.WorkloadTypeImage
+						signature.Confidence = 0.6
+						return
+					}
+				}
+				for _, kw := range textKeywords {
+					if strings.Contains(combined, kw) {
+						signature.DetectedWorkloadType = types.WorkloadTypeText
+						signature.Confidence = 0.6
+						return
+					}
+				}
+			}
+		}
+	}
+
+	// Check artifact paths for hints
+	for _, art := range argoInfo.InputArtifacts {
+		pathLower := strings.ToLower(art.Path + art.S3Key)
+		if strings.Contains(pathLower, "image") || strings.Contains(pathLower, "jpg") || strings.Contains(pathLower, "png") {
+			signature.DetectedWorkloadType = types.WorkloadTypeImage
+			signature.Confidence = 0.5
+			return
+		}
+		if strings.Contains(pathLower, "text") || strings.Contains(pathLower, "corpus") || strings.Contains(pathLower, "vocab") {
+			signature.DetectedWorkloadType = types.WorkloadTypeText
+			signature.Confidence = 0.5
+			return
+		}
+	}
+}
+
+// RefreshArgoInfo refreshes Argo workflow info (call periodically)
+func (wa *WorkloadAnalyzer) RefreshArgoInfo() {
+	wa.collector.RefreshArgoInfo()
+
+	if argoInfo := wa.collector.GetArgoWorkflowInfo(); argoInfo != nil {
+		wa.traceMux.Lock()
+		wa.currentTrace.ArgoWorkflow = argoInfo
+		wa.updateSignatureWithArgoInfo(argoInfo)
+		wa.traceMux.Unlock()
 	}
 }
 
