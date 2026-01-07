@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"insight-trace/pkg/analyzer"
+	"insight-trace/pkg/apollo"
 	"insight-trace/pkg/collector"
 	traceGrpc "insight-trace/pkg/grpc"
 	"insight-trace/pkg/types"
@@ -34,6 +35,10 @@ type Sidecar struct {
 	// gRPC server
 	grpcServer *traceGrpc.TraceServer
 	grpcPort   string
+
+	// APOLLO client
+	apolloClient   *apollo.Client
+	apolloEndpoint string
 
 	// Control
 	ctx    context.Context
@@ -58,24 +63,54 @@ func NewSidecar(config *types.CollectorConfig) *Sidecar {
 		grpcPort = "9091"
 	}
 
+	// APOLLO endpoint (gRPC)
+	apolloEndpoint := os.Getenv("APOLLO_ENDPOINT")
+	if apolloEndpoint == "" {
+		apolloEndpoint = "apollo-policy-server.keti.svc.cluster.local:50051"
+	}
+
 	// Create gRPC server
 	grpcServer := traceGrpc.NewTraceServer(coll, anal, grpcPort)
 
+	// Create APOLLO client
+	var apolloClient *apollo.Client
+	if apolloEndpoint != "" {
+		apolloClient = apollo.NewClient(apolloEndpoint)
+	}
+
 	return &Sidecar{
-		config:     config,
-		collector:  coll,
-		analyzer:   anal,
-		port:       port,
-		grpcServer: grpcServer,
-		grpcPort:   grpcPort,
-		ctx:        ctx,
-		cancel:     cancel,
+		config:         config,
+		collector:      coll,
+		analyzer:       anal,
+		port:           port,
+		grpcServer:     grpcServer,
+		grpcPort:       grpcPort,
+		apolloClient:   apolloClient,
+		apolloEndpoint: apolloEndpoint,
+		ctx:            ctx,
+		cancel:         cancel,
 	}
 }
 
 // Start starts the sidecar
 func (s *Sidecar) Start() error {
 	log.Println("Starting Insight Trace Sidecar...")
+
+	// Connect to APOLLO
+	if s.apolloClient != nil {
+		go func() {
+			// Retry connection in background
+			for i := 0; i < 5; i++ {
+				if err := s.apolloClient.Connect(); err != nil {
+					log.Printf("[APOLLO] Connection attempt %d failed: %v", i+1, err)
+					time.Sleep(5 * time.Second)
+					continue
+				}
+				log.Printf("[APOLLO] Connected to %s", s.apolloEndpoint)
+				break
+			}
+		}()
+	}
 
 	// Start metrics collector
 	s.collector.Start()
@@ -84,7 +119,7 @@ func (s *Sidecar) Start() error {
 	s.wg.Add(1)
 	go s.analyzeLoop()
 
-	// Start reporter loop (send to orchestrator)
+	// Start reporter loop (send to orchestrator and APOLLO)
 	s.wg.Add(1)
 	go s.reportLoop()
 
@@ -97,7 +132,7 @@ func (s *Sidecar) Start() error {
 		log.Printf("Warning: Failed to start gRPC server: %v", err)
 	}
 
-	log.Printf("Insight Trace Sidecar started - HTTP: %s, gRPC: %s", s.port, s.grpcPort)
+	log.Printf("Insight Trace Sidecar started - HTTP: %s, gRPC: %s, APOLLO: %s", s.port, s.grpcPort, s.apolloEndpoint)
 	return nil
 }
 
@@ -111,6 +146,11 @@ func (s *Sidecar) Stop() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		s.server.Shutdown(ctx)
+	}
+
+	// Close APOLLO client
+	if s.apolloClient != nil {
+		s.apolloClient.Close()
 	}
 
 	// Stop collector
@@ -179,7 +219,7 @@ func (s *Sidecar) handleAnalysisResult(result *types.AnalysisResult) {
 	}
 }
 
-// reportLoop periodically reports to the orchestrator
+// reportLoop periodically reports to the orchestrator and APOLLO
 func (s *Sidecar) reportLoop() {
 	defer s.wg.Done()
 
@@ -194,7 +234,10 @@ func (s *Sidecar) reportLoop() {
 		case <-s.ctx.Done():
 			return
 		case <-ticker.C:
+			// Report to legacy orchestrator (HTTP)
 			s.reportToOrchestrator()
+			// Report to APOLLO (gRPC)
+			s.reportToApollo()
 		}
 	}
 }
@@ -236,6 +279,134 @@ func (s *Sidecar) reportToOrchestrator() {
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		log.Printf("Orchestrator returned status: %d", resp.StatusCode)
+	}
+}
+
+// reportToApollo sends current signature to APOLLO via gRPC
+func (s *Sidecar) reportToApollo() {
+	if s.apolloClient == nil {
+		return
+	}
+
+	signature := s.analyzer.GetCurrentSignature()
+	if signature == nil {
+		return
+	}
+
+	// Get pod info
+	podName, namespace, containerName, nodeName := s.collector.GetPodInfo()
+
+	// Convert types.WorkloadSignature to apollo.WorkloadSignatureData
+	sigData := &apollo.WorkloadSignatureData{
+		PodName:       podName,
+		PodNamespace:  namespace,
+		PodUID:        "", // Will be populated if available
+		NodeName:      nodeName,
+		ContainerName: containerName,
+
+		WorkloadType: mapWorkloadType(signature.DetectedWorkloadType),
+		CurrentStage: mapPipelineStage(signature.DetectedStage),
+		IOPattern:    mapIOPattern(signature.DetectedIOPattern),
+		Confidence:   signature.Confidence,
+
+		Framework:        signature.DetectedFramework,
+		FrameworkVersion: signature.DetectedVersion,
+
+		IsGPUWorkload:      signature.IsGPUWorkload,
+		IsDistributed:      signature.IsDistributed,
+		IsPipeline:         signature.IsPipeline,
+		PipelineStep:       signature.PipelineStep,
+		EstimatedBatchSize: signature.EstimatedBatchSize,
+
+		FirstSeen: signature.FirstSeen,
+		LastSeen:  signature.LastSeen,
+	}
+
+	// Add current metrics if available
+	currentMetrics := s.collector.GetCurrentMetrics()
+	if currentMetrics != nil {
+		sigData.CurrentMetrics = &apollo.ResourceMetricsData{
+			CPUUsagePercent:    currentMetrics.CPUUsagePercent,
+			MemoryUsagePercent: currentMetrics.MemoryUsagePercent,
+			MemoryUsedBytes:    currentMetrics.MemoryUsageBytes,
+			GPUUsagePercent:    currentMetrics.GPUUsagePercent,
+			GPUMemoryUsedBytes: currentMetrics.GPUMemoryUsedMB * 1024 * 1024,
+			DiskReadBytes:      currentMetrics.DiskReadBytes,
+			DiskWriteBytes:     currentMetrics.DiskWriteBytes,
+			DiskReadIOPS:       currentMetrics.DiskReadOps,
+			DiskWriteIOPS:      currentMetrics.DiskWriteOps,
+			NetworkRxBytes:     currentMetrics.NetworkRxBytes,
+			NetworkTxBytes:     currentMetrics.NetworkTxBytes,
+		}
+	}
+
+	// Add storage recommendation if available
+	if signature.RecommendedStorageClass != "" {
+		sigData.StorageRecommendation = &apollo.StorageRecommendationData{
+			RecommendedClass: signature.RecommendedStorageClass,
+			RecommendedIOPS:  int(signature.RecommendedIOPS),
+			Reason:           "Detected from workload analysis",
+		}
+	}
+
+	// Send to APOLLO
+	ctx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
+	defer cancel()
+
+	if err := s.apolloClient.ReportWorkloadSignature(ctx, sigData); err != nil {
+		log.Printf("[APOLLO] Failed to report signature: %v", err)
+	}
+}
+
+// mapWorkloadType converts types.WorkloadType to apollo.WorkloadType (int32)
+func mapWorkloadType(wt types.WorkloadType) int32 {
+	switch wt {
+	case types.WorkloadTypeImage:
+		return 1 // WORKLOAD_TYPE_IMAGE
+	case types.WorkloadTypeText:
+		return 2 // WORKLOAD_TYPE_TEXT
+	case types.WorkloadTypeTabular:
+		return 3 // WORKLOAD_TYPE_TABULAR
+	case types.WorkloadTypeAudio:
+		return 4 // WORKLOAD_TYPE_AUDIO
+	case types.WorkloadTypeMultimodal:
+		return 6 // WORKLOAD_TYPE_MULTIMODAL
+	default:
+		return 0 // WORKLOAD_TYPE_UNKNOWN
+	}
+}
+
+// mapPipelineStage converts types.PipelineStage to apollo.PipelineStage (int32)
+func mapPipelineStage(ps types.PipelineStage) int32 {
+	switch ps {
+	case types.StagePreprocessing:
+		return 2 // PIPELINE_STAGE_PREPROCESSING
+	case types.StageTraining:
+		return 3 // PIPELINE_STAGE_TRAINING
+	case types.StageEvaluation:
+		return 4 // PIPELINE_STAGE_VALIDATION
+	case types.StageServing:
+		return 5 // PIPELINE_STAGE_INFERENCE
+	default:
+		return 0 // PIPELINE_STAGE_UNKNOWN
+	}
+}
+
+// mapIOPattern converts types.IOPattern to apollo.IOPattern (int32)
+func mapIOPattern(iop types.IOPattern) int32 {
+	switch iop {
+	case types.IOPatternSequentialRead:
+		return 4 // IO_PATTERN_SEQUENTIAL
+	case types.IOPatternRandomRead:
+		return 5 // IO_PATTERN_RANDOM
+	case types.IOPatternBurstWrite:
+		return 6 // IO_PATTERN_BURSTY
+	case types.IOPatternBalanced:
+		return 3 // IO_PATTERN_BALANCED
+	case types.IOPatternWriteHeavy:
+		return 2 // IO_PATTERN_WRITE_HEAVY
+	default:
+		return 0 // IO_PATTERN_UNKNOWN
 	}
 }
 

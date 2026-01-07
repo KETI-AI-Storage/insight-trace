@@ -119,6 +119,8 @@ type WorkloadSignature struct {
 	// Resource profile
 	IsGPUWorkload        bool    `json:"is_gpu_workload"`
 	IsDistributed        bool    `json:"is_distributed"`
+	IsPipeline           bool    `json:"is_pipeline"`           // Whether this is a pipeline/DAG workload
+	PipelineStep         string  `json:"pipeline_step,omitempty"` // Current step: preprocess, train, evaluate
 	EstimatedBatchSize   int     `json:"estimated_batch_size,omitempty"`
 
 	// Storage recommendations (to be used by Provisioning Operator)

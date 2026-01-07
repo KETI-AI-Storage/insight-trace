@@ -25,6 +25,10 @@ type MetricsCollector struct {
 	containerName string
 	nodeName   string
 
+	// Pipeline detection
+	isPipeline   bool   // Whether this is a pipeline workload
+	pipelineStep string // Current pipeline step (preprocess, train, evaluate, etc.)
+
 	// Current metrics
 	currentMetrics *types.ResourceMetrics
 	metricsMux     sync.RWMutex
@@ -56,12 +60,18 @@ type MetricsCollector struct {
 func NewMetricsCollector(config *types.CollectorConfig) *MetricsCollector {
 	ctx, cancel := context.WithCancel(context.Background())
 
+	// Check if this is a pipeline workload
+	isPipeline := os.Getenv("IS_PIPELINE") == "true"
+	pipelineStep := os.Getenv("PIPELINE_STEP")
+
 	mc := &MetricsCollector{
 		config:         config,
 		podName:        os.Getenv("POD_NAME"),
 		podNamespace:   os.Getenv("POD_NAMESPACE"),
 		containerName:  os.Getenv("CONTAINER_NAME"),
 		nodeName:       os.Getenv("NODE_NAME"),
+		isPipeline:     isPipeline,
+		pipelineStep:   pipelineStep,
 		metricsHistory: make([]types.ResourceMetrics, 0, config.MaxMetricsHistory),
 		argoClient:     argo.NewArgoClient(),
 		podLabels:      make(map[string]string),
@@ -71,6 +81,13 @@ func NewMetricsCollector(config *types.CollectorConfig) *MetricsCollector {
 
 	// Load pod labels from Downward API if available
 	mc.loadPodLabels()
+
+	// Log pipeline detection status
+	if mc.isPipeline {
+		log.Printf("[Pipeline] Detected as PIPELINE workload, step: %s", mc.pipelineStep)
+	} else {
+		log.Printf("[Workload] Detected as SIMPLE workload (non-pipeline)")
+	}
 
 	return mc
 }
@@ -467,28 +484,76 @@ func (mc *MetricsCollector) readFile(path string) (string, error) {
 }
 
 // DetectProcessInfo detects the main process info for workload classification
+// When shareProcessNamespace is enabled, scans all processes in the pod
 func (mc *MetricsCollector) DetectProcessInfo() map[string]string {
 	info := make(map[string]string)
+	var allCmdlines []string
 
-	// Read /proc/1/cmdline for main process
-	cmdline, err := ioutil.ReadFile("/proc/1/cmdline")
+	// Scan all processes in /proc (works with shareProcessNamespace: true)
+	procDirs, err := ioutil.ReadDir("/proc")
 	if err == nil {
-		// Replace null bytes with spaces
-		cmd := strings.ReplaceAll(string(cmdline), "\x00", " ")
-		info["cmdline"] = strings.TrimSpace(cmd)
+		for _, dir := range procDirs {
+			// Only process numeric directories (PIDs)
+			if !dir.IsDir() {
+				continue
+			}
+			pid := dir.Name()
+			if pid[0] < '0' || pid[0] > '9' {
+				continue
+			}
+
+			// Read cmdline for this process
+			cmdlinePath := filepath.Join("/proc", pid, "cmdline")
+			cmdline, err := ioutil.ReadFile(cmdlinePath)
+			if err != nil {
+				continue
+			}
+
+			cmd := strings.ReplaceAll(string(cmdline), "\x00", " ")
+			cmd = strings.TrimSpace(cmd)
+			if cmd == "" {
+				continue
+			}
+
+			allCmdlines = append(allCmdlines, cmd)
+
+			// Check for AI framework keywords in this process
+			cmdLower := strings.ToLower(cmd)
+
+			// Detect Python/ML frameworks
+			if strings.Contains(cmdLower, "python") || strings.Contains(cmdLower, "torch") ||
+				strings.Contains(cmdLower, "tensorflow") || strings.Contains(cmdLower, "keras") {
+				// This is likely the main AI workload process
+				info["cmdline"] = cmd
+
+				// Read environment variables for this process
+				environPath := filepath.Join("/proc", pid, "environ")
+				if environ, err := ioutil.ReadFile(environPath); err == nil {
+					for _, env := range strings.Split(string(environ), "\x00") {
+						if strings.HasPrefix(env, "FRAMEWORK=") {
+							info["framework"] = strings.TrimPrefix(env, "FRAMEWORK=")
+						} else if strings.HasPrefix(env, "WORKLOAD_TYPE=") {
+							info["workload_type"] = strings.TrimPrefix(env, "WORKLOAD_TYPE=")
+						} else if strings.HasPrefix(env, "PIPELINE_STAGE=") {
+							info["pipeline_stage"] = strings.TrimPrefix(env, "PIPELINE_STAGE=")
+						}
+					}
+				}
+				break // Found the main AI process
+			}
+		}
 	}
 
-	// Read environment variables
-	environ, err := ioutil.ReadFile("/proc/1/environ")
-	if err == nil {
-		for _, env := range strings.Split(string(environ), "\x00") {
-			if strings.HasPrefix(env, "FRAMEWORK=") {
-				info["framework"] = strings.TrimPrefix(env, "FRAMEWORK=")
-			} else if strings.HasPrefix(env, "WORKLOAD_TYPE=") {
-				info["workload_type"] = strings.TrimPrefix(env, "WORKLOAD_TYPE=")
-			} else if strings.HasPrefix(env, "PIPELINE_STAGE=") {
-				info["pipeline_stage"] = strings.TrimPrefix(env, "PIPELINE_STAGE=")
-			}
+	// If no specific AI process found, use combined cmdlines
+	if info["cmdline"] == "" && len(allCmdlines) > 0 {
+		info["cmdline"] = strings.Join(allCmdlines, " | ")
+	}
+
+	// Fallback to /proc/1/cmdline
+	if info["cmdline"] == "" {
+		if cmdline, err := ioutil.ReadFile("/proc/1/cmdline"); err == nil {
+			cmd := strings.ReplaceAll(string(cmdline), "\x00", " ")
+			info["cmdline"] = strings.TrimSpace(cmd)
 		}
 	}
 
@@ -554,6 +619,16 @@ func (mc *MetricsCollector) SetPodLabels(labels map[string]string) {
 // GetPodLabels returns the pod labels
 func (mc *MetricsCollector) GetPodLabels() map[string]string {
 	return mc.podLabels
+}
+
+// IsPipeline returns whether this is a pipeline workload
+func (mc *MetricsCollector) IsPipeline() bool {
+	return mc.isPipeline
+}
+
+// GetPipelineStep returns the current pipeline step
+func (mc *MetricsCollector) GetPipelineStep() string {
+	return mc.pipelineStep
 }
 
 // IsArgoWorkflow checks if this pod is part of an Argo Workflow

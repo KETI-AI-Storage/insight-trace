@@ -1,0 +1,641 @@
+// ============================================
+// APOLLO - Adaptive Policy Optimization for Low-Latency I/O
+// KETI AI Storage System Communication Protocol
+// ============================================
+
+syntax = "proto3";
+
+package apollo;
+
+option go_package = "insight-trace/pkg/apollo";
+
+import "google/protobuf/timestamp.proto";
+
+// ============================================
+// 1. WorkloadSignature: Insight Trace -> APOLLO
+// 워크로드 특성 리포트 (Sidecar에서 수집)
+// ============================================
+message WorkloadSignature {
+  // Identification
+  string pod_name = 1;
+  string pod_namespace = 2;
+  string pod_uid = 3;
+  string node_name = 4;
+  string container_name = 5;
+
+  // Detected characteristics
+  WorkloadType workload_type = 6;
+  PipelineStage current_stage = 7;
+  IOPattern io_pattern = 8;
+  double confidence = 9;  // 0.0 ~ 1.0
+
+  // Framework detection
+  string framework = 10;  // tensorflow, pytorch, etc.
+  string framework_version = 11;
+
+  // Resource profile
+  bool is_gpu_workload = 12;
+  bool is_distributed = 13;
+  int32 estimated_batch_size = 14;
+  bool is_pipeline = 21;            // Whether this is a pipeline/DAG workload
+  string pipeline_step = 22;        // Current step: preprocess, train, evaluate
+
+  // Current metrics
+  ResourceMetrics current_metrics = 15;
+
+  // Storage recommendations (from Insight Trace analysis)
+  StorageRecommendation storage_recommendation = 16;
+
+  // Argo Workflows context
+  ArgoContext argo_context = 17;
+
+  // Timestamps
+  google.protobuf.Timestamp first_seen = 18;
+  google.protobuf.Timestamp last_seen = 19;
+  google.protobuf.Timestamp updated_at = 20;
+}
+
+// ============================================
+// 2. ClusterInsight: Insight Scope -> APOLLO
+// 클러스터 전체 상태 리포트 (DaemonSet에서 수집)
+// ============================================
+message ClusterInsight {
+  // Node information
+  string node_name = 1;
+  string node_uid = 2;
+
+  // Node resource status
+  NodeResources node_resources = 3;
+
+  // Storage status
+  repeated StorageDeviceStatus storage_devices = 4;
+
+  // Running workloads on this node
+  repeated WorkloadSummary running_workloads = 5;
+
+  // CSD (Computational Storage Device) status
+  repeated CSDStatus csd_devices = 6;
+
+  // GPU status
+  repeated GPUStatus gpu_devices = 7;
+
+  // Network status
+  NetworkStatus network_status = 8;
+
+  // Aggregated I/O statistics
+  IOStatistics io_statistics = 9;
+
+  // Timestamp
+  google.protobuf.Timestamp collected_at = 10;
+}
+
+// ============================================
+// 3. SchedulingPolicy: APOLLO -> Scheduler
+// 스케줄링 정책/힌트
+// ============================================
+message SchedulingPolicy {
+  // Request identification
+  string request_id = 1;
+  string pod_name = 2;
+  string pod_namespace = 3;
+
+  // Scheduling decision
+  SchedulingDecision decision = 4;
+
+  // Node preferences (ordered by priority)
+  repeated NodePreference node_preferences = 5;
+
+  // Resource requirements (computed by APOLLO)
+  ComputedResourceRequirements resource_requirements = 6;
+
+  // Storage requirements
+  StorageRequirements storage_requirements = 7;
+
+  // Scheduling constraints
+  repeated SchedulingConstraint constraints = 8;
+
+  // Priority and preemption
+  int32 priority = 9;
+  bool allow_preemption = 10;
+
+  // Affinity rules (generated based on workflow analysis)
+  repeated AffinityRule affinity_rules = 11;
+
+  // Reasoning (for debugging/logging)
+  string reason = 12;
+
+  // Timestamp
+  google.protobuf.Timestamp created_at = 13;
+  google.protobuf.Timestamp expires_at = 14;
+}
+
+// ============================================
+// 4. OrchestrationPolicy: APOLLO -> Orchestrator
+// 오케스트레이션 정책 (마이그레이션/프로비저닝/오토스케일링)
+// ============================================
+message OrchestrationPolicy {
+  // Request identification
+  string request_id = 1;
+
+  // Policy type
+  OrchestrationAction action = 2;
+
+  // Target specification
+  oneof target {
+    MigrationTarget migration = 3;
+    ProvisioningTarget provisioning = 4;
+    AutoscalingTarget autoscaling = 5;
+  }
+
+  // Priority
+  PolicyPriority priority = 6;
+
+  // Execution constraints
+  ExecutionConstraints constraints = 7;
+
+  // Reasoning
+  string reason = 8;
+  repeated string contributing_factors = 9;
+
+  // Timestamps
+  google.protobuf.Timestamp created_at = 10;
+  google.protobuf.Timestamp deadline = 11;
+}
+
+// ============================================
+// 5. ResourcePrediction: Node Resource Forecaster
+// 자원 예측 결과
+// ============================================
+message ResourcePrediction {
+  // Target identification
+  string node_name = 1;
+  string prediction_id = 2;
+
+  // Prediction timeframe
+  google.protobuf.Timestamp prediction_start = 3;
+  google.protobuf.Timestamp prediction_end = 4;
+  int32 prediction_horizon_minutes = 5;
+
+  // Predicted resource usage
+  repeated TimestampedResources predicted_usage = 6;
+
+  // Confidence intervals
+  double confidence_level = 7;  // e.g., 0.95 for 95% CI
+  repeated TimestampedResources upper_bound = 8;
+  repeated TimestampedResources lower_bound = 9;
+
+  // Anomaly detection
+  bool anomaly_detected = 10;
+  string anomaly_type = 11;
+  double anomaly_score = 12;
+
+  // Recommendations based on prediction
+  repeated PredictionRecommendation recommendations = 13;
+
+  // Model metadata
+  string model_type = 14;  // lstm, prophet, arima, etc.
+  double model_accuracy = 15;
+
+  // Timestamp
+  google.protobuf.Timestamp created_at = 16;
+}
+
+// ============================================
+// Enum Definitions
+// ============================================
+
+enum WorkloadType {
+  WORKLOAD_TYPE_UNKNOWN = 0;
+  WORKLOAD_TYPE_IMAGE = 1;      // 이미지 처리 (CNN, Vision)
+  WORKLOAD_TYPE_TEXT = 2;       // 텍스트 처리 (NLP, LLM)
+  WORKLOAD_TYPE_TABULAR = 3;    // 테이블 데이터 (ML)
+  WORKLOAD_TYPE_AUDIO = 4;      // 오디오 처리
+  WORKLOAD_TYPE_VIDEO = 5;      // 비디오 처리
+  WORKLOAD_TYPE_MULTIMODAL = 6; // 멀티모달
+  WORKLOAD_TYPE_GENERIC = 7;    // 일반 워크로드
+}
+
+enum PipelineStage {
+  PIPELINE_STAGE_UNKNOWN = 0;
+  PIPELINE_STAGE_DATA_LOADING = 1;    // 데이터 로딩
+  PIPELINE_STAGE_PREPROCESSING = 2;   // 전처리
+  PIPELINE_STAGE_TRAINING = 3;        // 학습
+  PIPELINE_STAGE_VALIDATION = 4;      // 검증
+  PIPELINE_STAGE_INFERENCE = 5;       // 추론
+  PIPELINE_STAGE_POSTPROCESSING = 6;  // 후처리
+  PIPELINE_STAGE_CHECKPOINTING = 7;   // 체크포인팅
+  PIPELINE_STAGE_IDLE = 8;            // 유휴
+}
+
+enum IOPattern {
+  IO_PATTERN_UNKNOWN = 0;
+  IO_PATTERN_READ_HEAVY = 1;     // 읽기 집중
+  IO_PATTERN_WRITE_HEAVY = 2;    // 쓰기 집중
+  IO_PATTERN_BALANCED = 3;       // 균형
+  IO_PATTERN_SEQUENTIAL = 4;     // 순차적
+  IO_PATTERN_RANDOM = 5;         // 랜덤
+  IO_PATTERN_BURSTY = 6;         // 버스티
+}
+
+enum SchedulingDecision {
+  SCHEDULING_DECISION_UNSPECIFIED = 0;
+  SCHEDULING_DECISION_ALLOW = 1;       // 스케줄링 허용
+  SCHEDULING_DECISION_PREFER = 2;      // 특정 노드 선호
+  SCHEDULING_DECISION_REQUIRE = 3;     // 특정 노드 필수
+  SCHEDULING_DECISION_DELAY = 4;       // 스케줄링 지연
+  SCHEDULING_DECISION_REJECT = 5;      // 스케줄링 거부
+}
+
+enum OrchestrationAction {
+  ORCHESTRATION_ACTION_UNSPECIFIED = 0;
+  ORCHESTRATION_ACTION_MIGRATE = 1;     // Pod 마이그레이션
+  ORCHESTRATION_ACTION_PROVISION = 2;   // 스토리지 프로비저닝
+  ORCHESTRATION_ACTION_SCALE_UP = 3;    // 스케일 업
+  ORCHESTRATION_ACTION_SCALE_DOWN = 4;  // 스케일 다운
+  ORCHESTRATION_ACTION_REBALANCE = 5;   // 리밸런싱
+  ORCHESTRATION_ACTION_OPTIMIZE = 6;    // 최적화
+}
+
+enum PolicyPriority {
+  POLICY_PRIORITY_UNSPECIFIED = 0;
+  POLICY_PRIORITY_LOW = 1;
+  POLICY_PRIORITY_MEDIUM = 2;
+  POLICY_PRIORITY_HIGH = 3;
+  POLICY_PRIORITY_CRITICAL = 4;
+}
+
+enum StorageClass {
+  STORAGE_CLASS_UNSPECIFIED = 0;
+  STORAGE_CLASS_STANDARD = 1;      // 표준 (HDD)
+  STORAGE_CLASS_FAST = 2;          // 빠른 (SSD)
+  STORAGE_CLASS_ULTRA_FAST = 3;    // 초고속 (NVMe)
+  STORAGE_CLASS_CSD = 4;           // CSD (Computational Storage)
+  STORAGE_CLASS_MEMORY = 5;        // 메모리 기반
+}
+
+// ============================================
+// Sub-message Definitions
+// ============================================
+
+message ResourceMetrics {
+  // CPU
+  double cpu_usage_percent = 1;
+  double cpu_request_cores = 2;
+  double cpu_limit_cores = 3;
+
+  // Memory
+  double memory_usage_percent = 4;
+  int64 memory_usage_bytes = 5;
+  int64 memory_request_bytes = 6;
+  int64 memory_limit_bytes = 7;
+
+  // Disk I/O
+  int64 disk_read_bytes = 8;
+  int64 disk_write_bytes = 9;
+  int64 disk_read_iops = 10;
+  int64 disk_write_iops = 11;
+  double disk_read_throughput_mbps = 12;
+  double disk_write_throughput_mbps = 13;
+
+  // Network I/O
+  int64 network_rx_bytes = 14;
+  int64 network_tx_bytes = 15;
+  double network_rx_throughput_mbps = 16;
+  double network_tx_throughput_mbps = 17;
+
+  // GPU (optional)
+  double gpu_usage_percent = 18;
+  int64 gpu_memory_usage_bytes = 19;
+  int64 gpu_memory_total_bytes = 20;
+
+  // Timestamp
+  google.protobuf.Timestamp collected_at = 21;
+}
+
+message StorageRecommendation {
+  StorageClass recommended_class = 1;
+  string recommended_size = 2;  // e.g., "10Gi"
+  int64 recommended_iops = 3;
+  int64 recommended_throughput_mbps = 4;
+  string reason = 5;
+}
+
+message ArgoContext {
+  string workflow_name = 1;
+  string workflow_namespace = 2;
+  string workflow_uid = 3;
+  string step_name = 4;
+  string template_name = 5;
+  repeated string dependencies = 6;
+  repeated string next_steps = 7;
+  bool is_dag_task = 8;
+  string phase = 9;  // Running, Succeeded, Failed
+  repeated ArgoArtifact input_artifacts = 10;
+  repeated ArgoArtifact output_artifacts = 11;
+  map<string, string> input_parameters = 12;
+}
+
+message ArgoArtifact {
+  string name = 1;
+  string path = 2;
+  string s3_key = 3;
+  string from = 4;
+}
+
+message NodeResources {
+  // Allocatable
+  double cpu_allocatable_cores = 1;
+  int64 memory_allocatable_bytes = 2;
+  int64 storage_allocatable_bytes = 3;
+  int32 gpu_allocatable = 4;
+
+  // Currently used
+  double cpu_used_cores = 5;
+  int64 memory_used_bytes = 6;
+  int64 storage_used_bytes = 7;
+  int32 gpu_used = 8;
+
+  // Available
+  double cpu_available_cores = 9;
+  int64 memory_available_bytes = 10;
+  int64 storage_available_bytes = 11;
+  int32 gpu_available = 12;
+}
+
+message StorageDeviceStatus {
+  string device_name = 1;
+  string device_type = 2;  // hdd, ssd, nvme, csd
+  int64 total_bytes = 3;
+  int64 used_bytes = 4;
+  int64 available_bytes = 5;
+  double utilization_percent = 6;
+  double health_score = 7;  // 0.0 ~ 1.0
+  int64 current_iops = 8;
+  int64 max_iops = 9;
+  double current_throughput_mbps = 10;
+  double max_throughput_mbps = 11;
+}
+
+message CSDStatus {
+  string device_id = 1;
+  string device_name = 2;
+  bool is_available = 3;
+  double compute_utilization = 4;
+  int64 memory_used_bytes = 5;
+  int64 memory_total_bytes = 6;
+  repeated string supported_operations = 7;  // e.g., ["filter", "aggregate", "compress"]
+  double health_score = 8;
+}
+
+message GPUStatus {
+  string gpu_id = 1;
+  string gpu_model = 2;
+  double utilization_percent = 3;
+  int64 memory_used_bytes = 4;
+  int64 memory_total_bytes = 5;
+  double temperature_celsius = 6;
+  double power_usage_watts = 7;
+  bool is_available = 8;
+}
+
+message NetworkStatus {
+  double bandwidth_mbps = 1;
+  double current_utilization = 2;
+  double latency_ms = 3;
+  int64 packets_rx = 4;
+  int64 packets_tx = 5;
+  int64 errors = 6;
+}
+
+message IOStatistics {
+  // Aggregated I/O metrics
+  int64 total_read_bytes = 1;
+  int64 total_write_bytes = 2;
+  int64 total_read_ops = 3;
+  int64 total_write_ops = 4;
+  double avg_read_latency_ms = 5;
+  double avg_write_latency_ms = 6;
+  double p99_read_latency_ms = 7;
+  double p99_write_latency_ms = 8;
+}
+
+message WorkloadSummary {
+  string pod_name = 1;
+  string pod_namespace = 2;
+  WorkloadType workload_type = 3;
+  PipelineStage current_stage = 4;
+  double cpu_usage = 5;
+  double memory_usage = 6;
+  double io_usage = 7;
+}
+
+message NodePreference {
+  string node_name = 1;
+  int32 score = 2;  // 0-100
+  string reason = 3;
+}
+
+message ComputedResourceRequirements {
+  double cpu_cores = 1;
+  int64 memory_bytes = 2;
+  int64 storage_bytes = 3;
+  int32 gpu_count = 4;
+  int64 expected_iops = 5;
+  int64 expected_throughput_mbps = 6;
+}
+
+message StorageRequirements {
+  StorageClass storage_class = 1;
+  int64 size_bytes = 2;
+  int64 min_iops = 3;
+  int64 min_throughput_mbps = 4;
+  IOPattern expected_io_pattern = 5;
+  bool requires_csd = 6;
+}
+
+message SchedulingConstraint {
+  string constraint_type = 1;  // node_selector, toleration, affinity, etc.
+  string key = 2;
+  string operator = 3;
+  repeated string values = 4;
+}
+
+message AffinityRule {
+  string rule_type = 1;  // pod_affinity, pod_anti_affinity, node_affinity
+  string topology_key = 2;
+  repeated string target_labels = 3;
+  bool is_required = 4;  // required vs preferred
+  int32 weight = 5;
+}
+
+message MigrationTarget {
+  string pod_name = 1;
+  string pod_namespace = 2;
+  string source_node = 3;
+  string target_node = 4;
+  bool preserve_pv = 5;
+  int32 timeout_seconds = 6;
+}
+
+message ProvisioningTarget {
+  string pvc_name = 1;
+  string namespace = 2;
+  StorageClass storage_class = 3;
+  int64 size_bytes = 4;
+  int64 iops = 5;
+  int64 throughput_mbps = 6;
+  string access_mode = 7;  // ReadWriteOnce, ReadWriteMany, etc.
+}
+
+message AutoscalingTarget {
+  string workload_name = 1;
+  string workload_namespace = 2;
+  string workload_kind = 3;  // Deployment, StatefulSet, etc.
+  int32 current_replicas = 4;
+  int32 desired_replicas = 5;
+  string scaling_reason = 6;
+}
+
+message ExecutionConstraints {
+  int32 max_retries = 1;
+  int32 timeout_seconds = 2;
+  bool allow_disruption = 3;
+  repeated string blackout_windows = 4;  // e.g., "09:00-17:00"
+}
+
+message TimestampedResources {
+  google.protobuf.Timestamp timestamp = 1;
+  double cpu_usage = 2;
+  double memory_usage = 3;
+  double io_usage = 4;
+  double network_usage = 5;
+}
+
+message PredictionRecommendation {
+  string recommendation_type = 1;  // scale, migrate, provision, etc.
+  string description = 2;
+  PolicyPriority priority = 3;
+  google.protobuf.Timestamp recommended_action_time = 4;
+}
+
+// ============================================
+// gRPC Service Definitions
+// ============================================
+
+// InsightService: Trace/Scope -> APOLLO 데이터 수집
+service InsightService {
+  // Insight Trace에서 워크로드 시그니처 전송
+  rpc ReportWorkloadSignature(WorkloadSignature) returns (ReportResponse);
+
+  // Insight Trace에서 워크로드 시그니처 스트리밍
+  rpc StreamWorkloadSignatures(stream WorkloadSignature) returns (StreamResponse);
+
+  // Insight Scope에서 클러스터 인사이트 전송
+  rpc ReportClusterInsight(ClusterInsight) returns (ReportResponse);
+
+  // Insight Scope에서 클러스터 인사이트 스트리밍
+  rpc StreamClusterInsights(stream ClusterInsight) returns (StreamResponse);
+}
+
+// SchedulingPolicyService: APOLLO -> Scheduler 정책 전달
+service SchedulingPolicyService {
+  // 특정 Pod에 대한 스케줄링 정책 요청
+  rpc GetSchedulingPolicy(SchedulingPolicyRequest) returns (SchedulingPolicy);
+
+  // 스케줄링 결과 피드백
+  rpc ReportSchedulingResult(SchedulingResult) returns (ReportResponse);
+}
+
+// OrchestrationPolicyService: APOLLO -> Orchestrator 정책 전달
+service OrchestrationPolicyService {
+  // 오케스트레이션 정책 구독 (스트리밍)
+  rpc SubscribePolicies(PolicySubscription) returns (stream OrchestrationPolicy);
+
+  // 특정 워크로드에 대한 정책 요청
+  rpc GetOrchestrationPolicy(OrchestrationPolicyRequest) returns (OrchestrationPolicy);
+
+  // 정책 실행 결과 피드백
+  rpc ReportExecutionResult(ExecutionResult) returns (ReportResponse);
+}
+
+// ForecastService: 내부 예측 서비스
+service ForecastService {
+  // 특정 노드의 자원 예측 요청
+  rpc GetResourcePrediction(PredictionRequest) returns (ResourcePrediction);
+
+  // 클러스터 전체 예측
+  rpc GetClusterPrediction(ClusterPredictionRequest) returns (ClusterPrediction);
+}
+
+// ============================================
+// Request/Response Messages
+// ============================================
+
+message ReportResponse {
+  bool success = 1;
+  string message = 2;
+  string request_id = 3;
+}
+
+message StreamResponse {
+  int64 messages_received = 1;
+  int64 messages_processed = 2;
+  string status = 3;
+}
+
+message SchedulingPolicyRequest {
+  string pod_name = 1;
+  string pod_namespace = 2;
+  string pod_uid = 3;
+  map<string, string> pod_labels = 4;
+  map<string, string> pod_annotations = 5;
+}
+
+message SchedulingResult {
+  string request_id = 1;
+  string pod_name = 2;
+  string pod_namespace = 3;
+  string scheduled_node = 4;
+  bool success = 5;
+  string failure_reason = 6;
+  int64 scheduling_duration_ms = 7;
+}
+
+message PolicySubscription {
+  string subscriber_id = 1;
+  repeated OrchestrationAction action_filters = 2;
+  repeated string namespace_filters = 3;
+}
+
+message OrchestrationPolicyRequest {
+  string pod_name = 1;
+  string pod_namespace = 2;
+  OrchestrationAction requested_action = 3;
+}
+
+message ExecutionResult {
+  string request_id = 1;
+  OrchestrationAction action = 2;
+  bool success = 3;
+  string failure_reason = 4;
+  int64 execution_duration_ms = 5;
+  map<string, string> metrics = 6;
+}
+
+message PredictionRequest {
+  string node_name = 1;
+  int32 horizon_minutes = 2;
+  double confidence_level = 3;
+}
+
+message ClusterPredictionRequest {
+  int32 horizon_minutes = 1;
+  double confidence_level = 2;
+  repeated string node_filters = 3;
+}
+
+message ClusterPrediction {
+  repeated ResourcePrediction node_predictions = 1;
+  ResourcePrediction aggregated_prediction = 2;
+  google.protobuf.Timestamp created_at = 3;
+}

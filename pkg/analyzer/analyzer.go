@@ -58,6 +58,10 @@ type AnalysisThresholds struct {
 func NewWorkloadAnalyzer(coll *collector.MetricsCollector, config *types.CollectorConfig) *WorkloadAnalyzer {
 	podName, podNamespace, containerName, nodeName := coll.GetPodInfo()
 
+	// Get pipeline info from collector
+	isPipeline := coll.IsPipeline()
+	pipelineStep := coll.GetPipelineStep()
+
 	trace := &types.WorkloadTrace{
 		TraceID:      generateTraceID(podName, podNamespace),
 		PodName:      podName,
@@ -69,6 +73,8 @@ func NewWorkloadAnalyzer(coll *collector.MetricsCollector, config *types.Collect
 			PodName:       podName,
 			PodNamespace:  podNamespace,
 			ContainerName: containerName,
+			IsPipeline:    isPipeline,
+			PipelineStep:  pipelineStep,
 			FirstSeen:     time.Now(),
 			LastSeen:      time.Now(),
 		},
@@ -83,6 +89,13 @@ func NewWorkloadAnalyzer(coll *collector.MetricsCollector, config *types.Collect
 		stageMetrics:     make([]types.ResourceMetrics, 0),
 		stageTransitions: make([]types.StageTransition, 0),
 		thresholds:       getDefaultThresholds(),
+	}
+
+	// Log pipeline status
+	if isPipeline {
+		log.Printf("[Analyzer] Pipeline workload detected - Step: %s", pipelineStep)
+	} else {
+		log.Printf("[Analyzer] Simple workload detected (non-pipeline)")
 	}
 
 	// Initialize Argo workflow info if available
