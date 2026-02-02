@@ -1,12 +1,13 @@
 package collector
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io/ioutil"
 	"log"
+	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -390,28 +391,93 @@ func (mc *MetricsCollector) collectNetworkMetrics(metrics *types.ResourceMetrics
 	}
 }
 
-// collectGPUMetrics collects GPU metrics using nvidia-smi
+// collectGPUMetrics collects GPU metrics from DCGM Exporter
 func (mc *MetricsCollector) collectGPUMetrics(metrics *types.ResourceMetrics) {
-	// Check if nvidia-smi is available
-	cmd := exec.Command("nvidia-smi",
-		"--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw",
-		"--format=csv,noheader,nounits")
+	// Get DCGM exporter endpoint
+	dcgmEndpoint := os.Getenv("DCGM_EXPORTER_ENDPOINT")
+	if dcgmEndpoint == "" {
+		dcgmEndpoint = "http://dcgm-exporter.gpu-monitoring.svc.cluster.local:9400/metrics"
+	}
 
-	output, err := cmd.Output()
+	// Fetch metrics from DCGM Exporter
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(dcgmEndpoint)
 	if err != nil {
-		// GPU not available or nvidia-smi not installed
+		// DCGM not available
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
 		return
 	}
 
-	// Parse: "utilization, memory.used, memory.total, temperature, power"
-	parts := strings.Split(strings.TrimSpace(string(output)), ", ")
-	if len(parts) >= 5 {
-		metrics.GPUUsagePercent, _ = strconv.ParseFloat(strings.TrimSpace(parts[0]), 64)
-		metrics.GPUMemoryUsedMB, _ = strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
-		metrics.GPUMemoryTotalMB, _ = strconv.ParseInt(strings.TrimSpace(parts[2]), 10, 64)
-		metrics.GPUTemperature, _ = strconv.ParseFloat(strings.TrimSpace(parts[3]), 64)
-		metrics.GPUPowerWatts, _ = strconv.ParseFloat(strings.TrimSpace(parts[4]), 64)
+	// Parse Prometheus format and find metrics for this pod
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		// Skip comments and empty lines
+		if strings.HasPrefix(line, "#") || line == "" {
+			continue
+		}
+
+		// Look for metrics matching this pod
+		podFilter := fmt.Sprintf(`pod="%s"`, mc.podName)
+		if !strings.Contains(line, podFilter) && !strings.Contains(line, `pod=""`) {
+			continue
+		}
+
+		// Parse GPU utilization
+		if strings.HasPrefix(line, "DCGM_FI_DEV_GPU_UTIL") {
+			if val := mc.extractMetricValue(line); val >= 0 {
+				metrics.GPUUsagePercent = val
+			}
+		}
+
+		// Parse GPU memory used (MiB)
+		if strings.HasPrefix(line, "DCGM_FI_DEV_FB_USED") {
+			if val := mc.extractMetricValue(line); val >= 0 {
+				metrics.GPUMemoryUsedMB = int64(val)
+			}
+		}
+
+		// Parse GPU memory total (MiB)
+		if strings.HasPrefix(line, "DCGM_FI_DEV_FB_TOTAL") {
+			if val := mc.extractMetricValue(line); val >= 0 {
+				metrics.GPUMemoryTotalMB = int64(val)
+			}
+		}
+
+		// Parse GPU temperature
+		if strings.HasPrefix(line, "DCGM_FI_DEV_GPU_TEMP") {
+			if val := mc.extractMetricValue(line); val >= 0 {
+				metrics.GPUTemperature = val
+			}
+		}
+
+		// Parse GPU power usage
+		if strings.HasPrefix(line, "DCGM_FI_DEV_POWER_USAGE") {
+			if val := mc.extractMetricValue(line); val >= 0 {
+				metrics.GPUPowerWatts = val
+			}
+		}
 	}
+}
+
+// extractMetricValue extracts the numeric value from a Prometheus metric line
+func (mc *MetricsCollector) extractMetricValue(line string) float64 {
+	// Format: metric_name{labels} value
+	parts := strings.Split(line, "}")
+	if len(parts) < 2 {
+		return -1
+	}
+	valStr := strings.TrimSpace(parts[len(parts)-1])
+	val, err := strconv.ParseFloat(valStr, 64)
+	if err != nil {
+		return -1
+	}
+	return val
 }
 
 // calculateRates calculates per-second rates

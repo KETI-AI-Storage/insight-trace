@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -268,8 +269,16 @@ func (s *Sidecar) reportToOrchestrator() {
 		return
 	}
 
-	// Send to orchestrator
-	url := fmt.Sprintf("%s/api/v1/insight/report", s.config.OrchestratorEndpoint)
+	// Send to orchestrator via HTTP
+	// Ensure http:// prefix and use port 8080 for REST API
+	endpoint := s.config.OrchestratorEndpoint
+	// Replace gRPC port with HTTP port
+	endpoint = strings.Replace(endpoint, ":50051", ":8080", 1)
+	// Add http:// prefix if not present
+	if !strings.HasPrefix(endpoint, "http://") && !strings.HasPrefix(endpoint, "https://") {
+		endpoint = "http://" + endpoint
+	}
+	url := fmt.Sprintf("%s/api/v1/insight/report", endpoint)
 	resp, err := http.Post(url, "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
 		log.Printf("Failed to report to orchestrator: %v", err)
