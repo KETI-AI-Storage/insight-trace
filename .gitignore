@@ -1,0 +1,47 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+/main
+/insight-trace
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Go workspace file
+go.work
+
+# Dependency directories
+vendor/
+
+# Local Go toolchain cache placed inside the module (air-gapped build box) — multi-GB, never commit
+.tmp-go/
+
+# Python venv / caches
+.venv/
+__pycache__/
+
+# Archives
+*.tar
+*.tar.gz
+*.zip
+
+# editor and IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
