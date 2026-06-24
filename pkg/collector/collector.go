@@ -39,6 +39,7 @@ type MetricsCollector struct {
 	historyMux     sync.RWMutex
 
 	// Previous values for rate calculation
+	prevCPUSeconds float64
 	prevDiskRead   int64
 	prevDiskWrite  int64
 	prevNetRx      int64
@@ -171,21 +172,47 @@ func (mc *MetricsCollector) collectOnce() {
 
 // collectCPUMetrics collects CPU usage metrics
 func (mc *MetricsCollector) collectCPUMetrics(metrics *types.ResourceMetrics) {
-	// Try cgroup v2 first
-	cpuUsage, err := mc.readCgroupV2CPU()
+	// Read the cumulative CPU-time counter (in seconds). Try cgroup v2 first.
+	cpuSeconds, err := mc.readCgroupV2CPU()
 	if err != nil {
 		// Fallback to cgroup v1
-		cpuUsage, err = mc.readCgroupV1CPU()
+		cpuSeconds, err = mc.readCgroupV1CPU()
 		if err != nil {
 			log.Printf("Failed to read CPU metrics: %v", err)
 			return
 		}
 	}
-	metrics.CPUUsagePercent = cpuUsage
+
+	// Convert the cumulative counter into a usage percentage using the delta
+	// since the previous sample. prevTimestamp still holds the previous sample's
+	// time at this point (it is updated at the end of collectOnce).
+	metrics.CPUUsagePercent = computeCPUPercent(mc.prevCPUSeconds, mc.prevTimestamp, cpuSeconds, metrics.Timestamp)
+	mc.prevCPUSeconds = cpuSeconds
+
 	metrics.CPUCores = mc.getCPUCores()
 
 	// Read throttled periods
 	metrics.CPUThrottledPeriod = mc.readCPUThrottled()
+}
+
+// computeCPUPercent converts a cumulative CPU-time counter (in seconds) into a
+// usage percentage over the wall-clock time elapsed between two samples.
+// 100 means one core fully busy; values can exceed 100 with multi-core usage.
+// It returns 0 when there is no previous sample, when no time has elapsed, or
+// when the counter appears to have reset (delta negative).
+func computeCPUPercent(prevCPUSeconds float64, prevTime time.Time, currCPUSeconds float64, currTime time.Time) float64 {
+	if prevTime.IsZero() {
+		return 0
+	}
+	elapsed := currTime.Sub(prevTime).Seconds()
+	if elapsed <= 0 {
+		return 0
+	}
+	deltaCPU := currCPUSeconds - prevCPUSeconds
+	if deltaCPU < 0 {
+		return 0
+	}
+	return (deltaCPU / elapsed) * 100
 }
 
 // readCgroupV2CPU reads CPU usage from cgroup v2
@@ -207,11 +234,12 @@ func (mc *MetricsCollector) readCgroupV2CPU() (float64, error) {
 		}
 	}
 
-	// Calculate percentage (simplified - needs time delta calculation)
+	// Return the cumulative CPU time in seconds; the caller turns this into a
+	// percentage via a delta over wall-clock time (see computeCPUPercent).
 	return float64(usageUsec) / 1000000.0, nil
 }
 
-// readCgroupV1CPU reads CPU usage from cgroup v1
+// readCgroupV1CPU reads cumulative CPU time (in seconds) from cgroup v1
 func (mc *MetricsCollector) readCgroupV1CPU() (float64, error) {
 	// Read cpuacct.usage
 	usagePath := "/sys/fs/cgroup/cpu/cpuacct.usage"
@@ -226,7 +254,8 @@ func (mc *MetricsCollector) readCgroupV1CPU() (float64, error) {
 	}
 
 	usageNs, _ := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
-	// Convert nanoseconds to percentage (simplified)
+	// Return the cumulative CPU time in seconds; the caller turns this into a
+	// percentage via a delta over wall-clock time (see computeCPUPercent).
 	return float64(usageNs) / 1000000000.0, nil
 }
 
